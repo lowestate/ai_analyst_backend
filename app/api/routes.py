@@ -7,19 +7,12 @@ from app.api.schemas import (
     ChatResponse
 )
 from app.services.dataset import process_upload
-from app.db.database import redis_client
 from app.core.config import logger
 from app.agent.graph import get_graph
 from app.agent.initial_invoke import generate_initial_metadata, USE_MOCK_ANSWERS
-from app.agent.utils import (
-    get_correlation_data,
-    get_column_stats_data
-)
-from app.agent.mock import (
-    generate_mock_correlation_report,
-    generate_mock_column_report
-)
+from app.agent.mock_handlers import MOCK_REGISTRY, MockCommands
 
+from app.db.database import redis_client
 assert redis_client is not None, "Redis client must be initialized"
 
 router = APIRouter()
@@ -72,49 +65,30 @@ async def chat_interaction(req: ChatRequest):
     
     if USE_MOCK_ANSWERS:
         logger.info("MOCK MODE: Перехват запроса чата")
-        msg_lower = user_message.lower()
         
-        if "корреляц" in msg_lower:
+        # .strip() уберет случайные пробелы в начале и конце, если юзер их случайно поставит
+        msg_lower = user_message.lower().strip() 
+        
+        # Проверяем строгое совпадение: есть ли точный ключ в нашем реестре?
+        handler_func = MOCK_REGISTRY.get(msg_lower)
+        
+        if handler_func:
+            # Если точное совпадение найдено — вызываем функцию
             try:
-                # 1. Считаем реальные данные
-                corr_data = get_correlation_data(req.chat_id)
-                # 2. Формируем красивый мок-текст
-                final_message = generate_mock_correlation_report(corr_data)
-                charts = [{"type": "correlation", "data": corr_data}]
+                final_message, charts = handler_func(req.chat_id)
             except Exception as e:
-                final_message = f"Ошибка мок-вычисления: {str(e)}"
-                charts = []
-        elif "анализ столбцов" in msg_lower:
-            try:
-                stats_data = get_column_stats_data(req.chat_id)
-                final_message = generate_mock_column_report(stats_data)
-                
-                charts = []
-                # 1. Графики для категорий
-                for col, counts in stats_data.get("categorical_charts", {}).items():
-                    charts.append({
-                        "type": "category_count",
-                        "data": {
-                            "column_name": col, # Прячем название сюда
-                            "counts": counts
-                        }
-                    })
-                
-                # 2. Графики для чисел
-                for col, hist_data in stats_data.get("numeric_charts", {}).items():
-                    charts.append({
-                        "type": "numeric_hist",
-                        "data": {
-                            "column_name": col, # Прячем название сюда
-                            "x": hist_data["x"],
-                            "y": hist_data["y"]
-                        }
-                    })
-            except Exception as e:
-                final_message = f"Ошибка мок-вычисления: {str(e)}"
+                logger.error(f"Ошибка мок-вычисления для '{msg_lower}': {str(e)}")
+                final_message = f"Ошибка вычисления инструмента: {str(e)}"
                 charts = []
         else:
-            final_message = "Это мок-режим. Доступные команды: корреляционная матрица или анализ столбцов"
+            # Если юзер написал что-то другое
+            final_message = (
+                "Это мок-режим 🤖. Я реагирую только на точные команды:\n"
+                "- корреляционная матрица\n"
+                "- анализ столбцов\n"
+                "- аномалии\n"
+                "- кросс-зависимости"
+            )
             charts = []
             
         # Записываем мок-взаимодействие в память графа, чтобы история не порвалась
@@ -150,3 +124,11 @@ async def chat_interaction(req: ChatRequest):
     charts = final_state.get("charts_payload", [])
     logger.info(f"\ncharts={charts}")
     return ChatResponse(reply=final_message, charts=charts)
+
+@router.get("/available_mock_commands")
+async def get_available_mock_commands():
+    """
+    Возвращает список всех доступных моковых команд из Enum.
+    """
+    # Достаем все значения (.value) из MockCommands
+    return {"commands": [cmd.value for cmd in MockCommands]}

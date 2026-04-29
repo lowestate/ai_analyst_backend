@@ -3,7 +3,12 @@ from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 
 from app.core.config import logger
-from app.agent.utils import get_column_stats_data, get_correlation_data
+from app.agent.utils import (
+    get_column_stats_data,
+    get_correlation_data,
+    get_outliers_data,
+    get_cross_dependencies_data
+)
 
 @tool
 def analyze_columns(config: RunnableConfig) -> str:
@@ -29,3 +34,23 @@ def correlation_matrix(config: RunnableConfig) -> str:
         
     logger.info(f"chat_id={chat_id} correlation_matrix tool DONE")
     return json.dumps({"tool_type": "correlation", "data": corr})
+
+@tool
+def detect_outliers(config: RunnableConfig) -> str:
+    """Выявляет аномалии и выбросы в числовых столбцах датасета."""
+    chat_id = config["configurable"]["chat_id"] # type: ignore
+    try:
+        data = get_outliers_data(chat_id)
+        return json.dumps({"tool_type": "outliers", "stats": data["stats"]})
+    except Exception as e:
+        return str(e)
+    
+@tool
+def cross_dependencies(config: RunnableConfig) -> str:
+    """Анализирует взаимосвязи между всеми признаками датасета (включая категориальные)."""
+    chat_id = config["configurable"]["chat_id"] # type: ignore
+    try:
+        data = get_cross_dependencies_data(chat_id)
+        return json.dumps({"tool_type": "cross_dependencies", "matrix": data["matrix"]})
+    except Exception as e:
+        return str(e)

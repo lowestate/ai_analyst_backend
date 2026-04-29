@@ -64,3 +64,68 @@ def get_column_stats_data(chat_id: str) -> dict:
         "categorical_uniform": categorical_uniform,
         "numeric_charts": numeric_charts # <-- Передаем новые графики
     }
+
+def get_outliers_data(chat_id: str) -> dict:
+    df = get_df_from_redis(chat_id)
+    numeric_cols = df.select_dtypes(include=['number']).columns
+    
+    stats = {}
+    charts = []
+    
+    for col in numeric_cols:
+        s = df[col].dropna()
+        if len(s) == 0: continue
+            
+        q1 = s.quantile(0.25)
+        q3 = s.quantile(0.75)
+        iqr = q3 - q1
+        lower_bound = q1 - 1.5 * iqr
+        upper_bound = q3 + 1.5 * iqr
+        
+        outliers = s[(s < lower_bound) | (s > upper_bound)]
+        outliers_count = len(outliers)
+        
+        stats[col] = {
+            "total": len(s),
+            "outliers_count": outliers_count,
+            "outliers_percent": round((outliers_count / len(s)) * 100, 2),
+            "lower": round(lower_bound, 2),
+            "upper": round(upper_bound, 2)
+        }
+        
+        if outliers_count > 0:
+            charts.append({
+                "type": "outliers",
+                "data": {
+                    "column_name": col,
+                    "y": s.tolist() # Отправляем массив для Boxplot
+                }
+            })
+            
+    return {"stats": stats, "charts": charts}
+
+def get_cross_dependencies_data(chat_id: str) -> dict:
+    df = get_df_from_redis(chat_id)
+    cols = df.columns
+    
+    # Хак для смешанных данных: факторизуем категории в числа и считаем ранговую корреляцию
+    df_numeric = pd.DataFrame()
+    for c in cols:
+        if df[c].dtype == 'object' or df[c].dtype.name == 'category':
+            df_numeric[c] = df[c].factorize()[0]
+        else:
+            df_numeric[c] = df[c]
+            
+    # Спирмен отлично ловит нелинейные и категориальные ассоциации
+    corr = df_numeric.corr(method='spearman').abs().fillna(0).round(2)
+    
+    x_vals, y_vals, scores = [], [], []
+    for c1 in corr.columns:
+        for c2 in corr.columns:
+            x_vals.append(c1)
+            y_vals.append(c2)
+            scores.append(float(corr.loc[c1, c2]))
+            
+    return {
+        "x": x_vals, "y": y_vals, "scores": scores, "matrix": corr.to_dict()
+    }

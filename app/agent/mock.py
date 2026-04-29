@@ -1,4 +1,4 @@
-def generate_mock_correlation_report(corr_data: dict) -> str:
+def mock_correlation_report(corr_data: dict) -> str:
     """Генерация текстового отчета на основе реальных цифр для мок-режима"""
     strong_positive = []
     strong_negative = []
@@ -36,7 +36,7 @@ def generate_mock_correlation_report(corr_data: dict) -> str:
         report += "\n"
 
     if moderate:
-        report += "Также стоит отметить умеренные корреляции:\n"
+        report += "Умеренные корреляции:\n"
         # Показываем только топ-3 умеренных, чтобы не спамить
         for pair, val in sorted(moderate, key=lambda x: abs(x[1]), reverse=True)[:3]:
             report += f"- {pair[0]} и {pair[1]} (R = {val})\n"
@@ -46,7 +46,7 @@ def generate_mock_correlation_report(corr_data: dict) -> str:
 
     return report.strip()
 
-def generate_mock_column_report(stats_data: dict) -> str:
+def mock_column_report(stats_data: dict) -> str:
     report = "Анализ столбцов успешно завершен.\n\n"
     
     numeric = stats_data.get("numeric", {})
@@ -79,3 +79,37 @@ def generate_mock_column_report(stats_data: dict) -> str:
             report += f"- **{col}**: Самая частая категория — '{top_cat}' ({counts.get(top_cat, 0)} шт.). {'Мелкие категории сгруппированы в «Другие».' if has_others else ''}\n"
 
     return report.strip()
+
+def mock_outliers_report(data: dict) -> str:
+    stats = data.get("stats", {})
+    report = "Анализ аномалий и выбросов завершен (метод межквартильного размаха IQR).\n\n"
+    report += "| Признак | Всего непустых | Выбросов (шт) | Выбросов (%) | Норм. диапазон |\n"
+    report += "|---|---|---|---|---|\n"
+    
+    for col, info in stats.items():
+        if info["outliers_count"] > 0:
+            report += f"| **{col}** | {info['total']} | {info['outliers_count']} | {info['outliers_percent']}% | от {info['lower']} до {info['upper']} |\n"
+            
+    if not any(info["outliers_count"] > 0 for info in stats.values()):
+        report += "Выбросов в числовых данных не обнаружено!\n"
+        
+    return report
+
+def mock_cross_dependencies_report(data: dict) -> str:
+    matrix = data.get("matrix", {})
+    report = "Глобальный анализ кросс-зависимостей признаков завершен.\n\n"
+    report += "Топ-5 самых сильных связей (исключая идентичные):\n"
+    
+    pairs = []
+    for c1, row in matrix.items():
+        for c2, val in row.items():
+            if c1 != c2 and (c2, c1, val) not in pairs: # Убираем дубликаты и диагональ
+                pairs.append((c1, c2, val))
+                
+    pairs.sort(key=lambda x: x[2], reverse=True)
+    
+    for c1, c2, val in pairs[:5]:
+        strength = "Очень сильная" if val > 0.8 else "Сильная" if val > 0.6 else "Умеренная"
+        report += f"- **{c1}** ↔ **{c2}**: показатель {val} ({strength})\n"
+        
+    return report
