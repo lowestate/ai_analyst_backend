@@ -45,3 +45,37 @@ def generate_mock_correlation_report(corr_data: dict) -> str:
         report += "Значимых корреляций между признаками не выявлено."
 
     return report.strip()
+
+def generate_mock_column_report(stats_data: dict) -> str:
+    report = "Анализ столбцов успешно завершен.\n\n"
+    
+    numeric = stats_data.get("numeric", {})
+    if numeric:
+        report += "### Числовые признаки\n"
+        cols = list(numeric.keys())
+        if cols:
+            metrics = list(numeric[cols[0]].keys())
+            header = "| Признак | " + " | ".join(metrics) + " |"
+            separator = "|---|" + "|".join(["---"] * len(metrics)) + "|"
+            report += header + "\n" + separator + "\n"
+            for col in cols:
+                row_vals = [str(numeric[col].get(m, 0)) for m in metrics]
+                report += f"| **{col}** | " + " | ".join(row_vals) + " |\n"
+        report += "\n"
+
+    cat_uniform = stats_data.get("categorical_uniform", {})
+    if cat_uniform:
+        report += "### Категориальные (Равномерные)\n"
+        for col, info in cat_uniform.items():
+            report += f"- **{col}**: {info['unique_count']} уник. категорий, примерно по {info['approx_val']} значений в каждой (график не строится, так как распределение равномерное).\n"
+        report += "\n"
+
+    cat_charts = stats_data.get("categorical_charts", {})
+    if cat_charts:
+        report += "### Категориальные (С явными лидерами)\n"
+        for col, counts in cat_charts.items():
+            top_cat = list(counts.keys())[0] if counts else "Нет"
+            has_others = "Другие" in counts
+            report += f"- **{col}**: Самая частая категория — '{top_cat}' ({counts.get(top_cat, 0)} шт.). {'Мелкие категории сгруппированы в «Другие».' if has_others else ''}\n"
+
+    return report.strip()
