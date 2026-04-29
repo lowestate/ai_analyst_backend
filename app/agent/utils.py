@@ -129,3 +129,62 @@ def get_cross_dependencies_data(chat_id: str) -> dict:
     return {
         "x": x_vals, "y": y_vals, "scores": scores, "matrix": corr.to_dict()
     }
+
+def get_trend_data(chat_id: str) -> dict:
+    df = get_df_from_redis(chat_id).copy()
+
+    # --- 1. ПОИСК КОЛОНКИ С ДАТОЙ ---
+    date_col = None
+    dt_cols = df.select_dtypes(include=['datetime', 'datetimetz']).columns
+    
+    if len(dt_cols) > 0:
+        date_col = dt_cols[0]
+    else:
+        keywords = ['date', 'time', 'дата', 'день', 'месяц', 'год', 'period']
+        for col in df.columns:
+            if any(kw in str(col).lower() for kw in keywords):
+                date_col = col
+                break
+        
+        if not date_col:
+            date_col = df.columns[0]
+            
+    # --- 2. БРОНЕБОЙНАЯ КОНВЕРТАЦИЯ ---
+    # Проверяем, не является ли колонка УЖЕ форматом времени
+    if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
+        # Пытаемся перевести все строки в числа (например, '41470.166' станет float)
+        numeric_vals = pd.to_numeric(df[date_col], errors='coerce')
+        
+        # Находим те ячейки, которые попадают в диапазон дат Excel (примерно 1927 - 2173 года)
+        is_excel = (numeric_vals > 10000) & (numeric_vals < 100000)
+        
+        # Создаем базовую маску: пытаемся распарсить как обычный текст/timestamp
+        parsed_dates = pd.to_datetime(df[date_col].astype(str), errors='coerce')
+        
+        # Точечно (векторизованно) перезаписываем те ячейки, которые оказались Excel-числами
+        if is_excel.any():
+            parsed_dates.loc[is_excel] = pd.to_datetime(numeric_vals[is_excel], unit='D', origin='1899-12-30')
+            
+        df[date_col] = parsed_dates
+
+    # --- 3. ОЧИСТКА И ФОРМАТИРОВАНИЕ ---
+    # Выкидываем пустые значения (NaT), из-за которых график может упасть
+    df = df.dropna(subset=[date_col])
+    df = df.sort_values(by=date_col)
+
+    numeric_cols = [c for c in df.select_dtypes(include=['number']).columns if c != date_col]
+
+    if not numeric_cols:
+        raise ValueError("В датасете нет числовых признаков для построения трендов.")
+
+    # Форматируем в идеальную строку. 
+    # Фронтенд (календарики От и До) ожидает строгий формат, поэтому отдаем ему четкие данные.
+    x_data = df[date_col].dt.strftime('%Y-%m-%d %H:%M:%S').tolist() 
+    y_data = {col: df[col].fillna(0).tolist() for col in numeric_cols}
+
+    return {
+        "date_col": date_col,
+        "numeric_cols": numeric_cols,
+        "x": x_data,
+        "y": y_data
+    }

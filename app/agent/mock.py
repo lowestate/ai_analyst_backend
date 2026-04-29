@@ -113,3 +113,24 @@ def mock_cross_dependencies_report(data: dict) -> str:
         report += f"- **{c1}** ↔ **{c2}**: показатель {val} ({strength})\n"
         
     return report
+
+def mock_trend_report(data: dict) -> str:
+    date_col = data.get("date_col", "Неизвестно")
+    cols = data.get("numeric_cols", [])
+    
+    report = f"**Анализ временных трендов (Time-Series) завершен.**\n\n"
+    report += f"Ось времени (X) привязана к признаку: `{date_col}`.\n"
+    report += f"Всего проанализировано числовых метрик: **{len(cols)}**.\n\n"
+    
+    report += "**Краткие выводы по динамике:**\n"
+    
+    # Даем словесную оценку только первым 3 признакам, чтобы не спамить
+    for col in cols[:3]:
+        report += f"- **{col}**: наблюдается стабильная дисперсия, резких разрывов в данных (gaps) не обнаружено. Присутствуют локальные всплески.\n"
+        
+    if len(cols) > 3:
+        report += f"- *(...и еще {len(cols) - 3} признак(ов).)*\n\n"
+        
+    report += "*Подсказка:* В раскрытом виде графика справа вы можете включать и отключать отображение конкретных линий с помощью панели чекбоксов."
+    
+    return report

@@ -7,7 +7,8 @@ from app.agent.utils import (
     get_column_stats_data,
     get_correlation_data,
     get_outliers_data,
-    get_cross_dependencies_data
+    get_cross_dependencies_data,
+    get_trend_data
 )
 
 @tool
@@ -52,5 +53,18 @@ def cross_dependencies(config: RunnableConfig) -> str:
     try:
         data = get_cross_dependencies_data(chat_id)
         return json.dumps({"tool_type": "cross_dependencies", "matrix": data["matrix"]})
+    except Exception as e:
+        return str(e)
+
+@tool
+def analyze_trends(config: RunnableConfig) -> str:
+    """
+    Строит графики трендов (линейные графики) во времени для всех числовых признаков.
+    Автоматически находит столбец с датой/временем и использует его как ось X.
+    """
+    chat_id = config["configurable"]["chat_id"] # type: ignore
+    try:
+        data = get_trend_data(chat_id)
+        return json.dumps({"tool_type": "trend_line", "data": data})
     except Exception as e:
         return str(e)

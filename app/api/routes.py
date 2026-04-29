@@ -88,6 +88,7 @@ async def chat_interaction(req: ChatRequest):
                 "- анализ столбцов\n"
                 "- аномалии\n"
                 "- кросс-зависимости"
+                "- тренд"
             )
             charts = []
             

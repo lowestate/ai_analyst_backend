@@ -4,13 +4,15 @@ from app.agent.utils import (
     get_correlation_data,
     get_column_stats_data,
     get_cross_dependencies_data,
-    get_outliers_data
+    get_outliers_data,
+    get_trend_data
 )
 from app.agent.mock import (
     mock_correlation_report,
     mock_column_report,
     mock_cross_dependencies_report,
-    mock_outliers_report
+    mock_outliers_report,
+    mock_trend_report
 )
 
 
@@ -19,6 +21,7 @@ class MockCommands(str, Enum):
     COLUMN_ANALYSIS = "анализ столбцов"
     ANOMALIES = "аномалии"
     CROSS_DEP = "кросс-зависимости"
+    TREND = "тренд"
 
 
 MOCK_REGISTRY = {}
@@ -68,4 +71,12 @@ def handle_cross_deps(chat_id: str):
     cross_data = get_cross_dependencies_data(chat_id)
     msg = mock_cross_dependencies_report(cross_data)
     charts = [{"type": "cross_deps", "data": cross_data}]
+    return msg, charts
+
+@register_mock(MockCommands.TREND.value)
+def handle_trends(chat_id: str):
+    trend_data = get_trend_data(chat_id)
+    msg = mock_trend_report(trend_data)
+    # Оборачиваем данные в правильный формат для фронтенда
+    charts = [{"type": "trend_line", "data": trend_data}] 
     return msg, charts
