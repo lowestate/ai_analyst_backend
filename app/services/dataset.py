@@ -12,6 +12,16 @@ def process_upload(file_obj, filename: str) -> tuple[str, str, dict, list]:
         df = pd.read_csv(file_obj)
     
     initial_shape = df.shape
+
+    cols_to_drop = []
+    for col in df.columns:
+        col_lower = str(col).lower()
+        if col_lower == 'id' or 'id_' in col_lower or '_id' in col_lower:
+            cols_to_drop.append(col)
+            
+    if cols_to_drop:
+        df.drop(columns=cols_to_drop, inplace=True)
+        
     duplicates_count = int(df.duplicated().sum())
     df.drop_duplicates(inplace=True)
     

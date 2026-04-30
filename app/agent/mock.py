@@ -147,3 +147,26 @@ def mock_dependency_report(data: dict) -> str:
         report += f"Смешанные типы данных: категориальный (`{data['cat_col']}`) и числовой (`{data['num_col']}`). Построен **Ящик с усами (Box Plot)**.\nЭтот график позволяет сравнить распределение числового признака, его медиану и разброс внутри каждой отдельной категории."
 
     return report
+
+def mock_feature_importances_report(data: dict) -> str:
+    target = data["target"]
+    # Переворачиваем обратно для текста (чтобы самый важный был первым)
+    features = data["features"][::-1] 
+    importances = data["importances"][::-1]
+
+    if not features:
+        return f"Не удалось определить важные признаки для '{target}'."
+
+    top_feature = features[0]
+    top_score = importances[0]
+
+    msg = "Я обучил ML-модель (Случайный лес) на ваших данных, чтобы выявить скрытые закономерности. "
+    msg += f"Ниже представлены параметры, которые сильнее всего влияют на {target}.\n\n"
+    
+    msg += f"**Признак с самым сильным влиянием:** `{top_feature}` (вклад: {int(top_score * 100)}%).\n\n"
+
+    msg += "**Топ признаков:**\n"
+    for f, imp in zip(features, importances):
+        msg += f"- **{f}**: {int(imp * 100)}%\n"
+
+    return msg

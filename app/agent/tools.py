@@ -9,7 +9,9 @@ from app.agent.base_analysis import (
     get_outliers_data,
     get_cross_dependencies_data,
     get_trend_data,
-    get_dependency_data
+    get_dependency_data,
+    get_pairplot_data,
+    get_all_relationships_data
 )
 
 @tool
@@ -79,3 +81,14 @@ def analyze_dependency(col1: str, col2: str, config: RunnableConfig) -> str:
         return json.dumps({"tool_type": "dependency", "data": data})
     except Exception as e:
         return str(e)
+    
+@tool
+def handle_all_relationships(chat_id: str):
+    """
+    Используй этот инструмент ВСЕГДА, когда пользователь просит показать "связи признаков", 
+    "взаимосвязи", "корреляции" или зависимости между колонками.
+    Этот инструмент автоматически генерирует сразу три графика: матрицу корреляций, 
+    граф связей и матрицу рассеяния.
+    Инструмент не требует уточнения колонок — он сам проанализирует весь датасет.
+    """
+    return get_all_relationships_data(chat_id)

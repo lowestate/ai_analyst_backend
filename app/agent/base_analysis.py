@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 
 from app.agent.utils import (
     get_df_from_redis,
@@ -7,7 +8,6 @@ from app.agent.utils import (
     remove_dates,
     remove_outliers
 )
-
 
 def get_correlation_data(chat_id: str) -> dict:
     """Чистая бизнес-логика вычисления корреляции, независимая от LangGraph"""
@@ -266,4 +266,95 @@ def get_pairplot_data(chat_id: str) -> dict:
         "dimensions": dimensions,
         "all_columns": num_cols,
         "default_columns": default_cols
+    }
+
+def get_all_relationships_data(chat_id: str) -> list[dict]:
+    """
+    Агрегирует данные сразу для трех графиков взаимосвязей.
+    """
+    charts = []
+    
+    # 1. Корреляционная матрица
+    try:
+        corr_data = get_correlation_data(chat_id)
+        charts.append({"type": "correlation", "data": corr_data})
+    except Exception as e:
+        print(f"Ошибка при генерации correlation: {e}")
+
+    # 2. Кросс-зависимости (Граф)
+    try:
+        cross_data = get_cross_dependencies_data(chat_id)
+        charts.append({"type": "cross_deps", "data": cross_data})
+    except Exception as e:
+        print(f"Ошибка при генерации cross_deps: {e}")
+
+    # 3. Матрица рассеяния (Pairplot)
+    try:
+        pairplot_data = get_pairplot_data(chat_id)
+        charts.append({"type": "pairplot", "data": pairplot_data})
+    except Exception as e:
+        print(f"Ошибка при генерации pairplot: {e}")
+
+    return charts
+
+def get_feature_importances(chat_id: str, target_col: str) -> dict:
+    """Вычисляет важность признаков для указанной целевой переменной с помощью Random Forest."""
+    # Используем провайдер очищенных данных (без дат, без пропусков)
+    df = remove_dates(chat_id)
+    
+    col_map = {c.lower(): c for c in df.columns}
+    real_target = col_map.get(target_col.lower())
+
+    if not real_target:
+        raise ValueError(f"Целевая колонка '{target_col}' не найдена в датасете.")
+
+    # Очищаем датафрейм только от тех строк, где пустой САМ таргет (без него не обучить)
+    df = df.dropna(subset=[real_target])
+    
+    y = df[real_target]
+    X = df.drop(columns=[real_target])
+
+    # УМНОЕ ЗАПОЛНЕНИЕ ПРОПУСКОВ (вместо dropna)
+    # Числа заполняем медианой, категории - отдельным классом 'Unknown'
+    for col in X.columns:
+        if pd.api.types.is_numeric_dtype(X[col]):
+            X[col] = X[col].fillna(X[col].median())
+        else:
+            X[col] = X[col].fillna('Unknown')
+
+    if len(X) < 10:
+        raise ValueError("Недостаточно данных для обучения модели (меньше 10 валидных строк).")
+
+    # Факторизуем категориальные фичи
+    for col in X.select_dtypes(include=['object', 'category', 'string']).columns:
+        X[col] = pd.factorize(X[col])[0]
+
+    # Определяем тип задачи
+    is_numeric = pd.api.types.is_numeric_dtype(y)
+    
+    if is_numeric and y.nunique() > 5:
+        from sklearn.ensemble import RandomForestRegressor
+        model = RandomForestRegressor(n_estimators=50, random_state=42)
+    else:
+        from sklearn.ensemble import RandomForestClassifier
+        if not is_numeric:
+            y = pd.factorize(y)[0]
+        model = RandomForestClassifier(n_estimators=50, random_state=42)
+
+    # Обучаем модель
+    model.fit(X, y)
+    importances = model.feature_importances_
+
+    imp_df = pd.DataFrame({
+        'feature': X.columns,
+        'importance': importances
+    })
+
+    imp_df = imp_df.sort_values(by='importance', ascending=False).head(7)
+    imp_df = imp_df.iloc[::-1]
+
+    return {
+        "target": real_target,
+        "features": imp_df['feature'].tolist(),
+        "importances": np.round(imp_df['importance'], 4).tolist()
     }

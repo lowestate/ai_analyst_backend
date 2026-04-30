@@ -8,7 +8,8 @@ from app.agent.base_analysis import (
     get_outliers_data,
     get_trend_data,
     get_dependency_data,
-    get_pairplot_data
+    get_pairplot_data,
+    get_feature_importances
 )
 from app.agent.mock import (
     mock_correlation_report,
@@ -16,7 +17,8 @@ from app.agent.mock import (
     mock_cross_dependencies_report,
     mock_outliers_report,
     mock_trend_report,
-    mock_dependency_report
+    mock_dependency_report,
+    mock_feature_importances_report
 )
 
 
@@ -27,11 +29,13 @@ class MockCommands(str, Enum):
     ANOMALIES = r"^аномалии$"
     CROSS_DEP = r"^кросс-зависимости$"
     TREND = r"^тренд$"
-    PAIRPLOT = r"^матрица рассеяния$"
-    
+    PAIRPLOT = r"^связи признаков$"
+    ALL_RELATIONS = r"^корреляционный анализ$"
+
     # ПАТТЕРН ДЛЯ ПЕРЕМЕННЫХ: 
     # Группа 1 ловит первый столбец, Группа 2 ловит второй столбец
     DEPENDANCY = r"^зависимость\s+(.+?)\s+от\s+(.+?)$"
+    FEATURE_IMPORTACES = r"^важность признаков для\s+(.+?)$"
 
 
 MOCK_REGISTRY = {}
@@ -110,4 +114,46 @@ def handle_pairplot_mock(chat_id: str):
         "Вы можете добавить или убрать признаки с помощью панели управления над графиком, чтобы найти скрытые нелинейные зависимости, кластеры и выбросы."
     )
     charts = [{"type": "pairplot", "data": data}]
+    return msg, charts
+
+@register_mock(MockCommands.ALL_RELATIONS.value)
+def handle_all_relationships(chat_id: str):
+    combined_msg_parts = []
+    combined_charts = []
+
+    # 1. Запрашиваем корреляционную матрицу
+    try:
+        msg, charts = handle_correlation(chat_id)
+        combined_msg_parts.append(msg)
+        combined_charts.extend(charts)
+    except Exception as e:
+        combined_msg_parts.append(f"⚠️ **Корреляционная матрица:** Ошибка при построении ({e})")
+
+    # 2. Запрашиваем граф кросс-зависимостей
+    try:
+        msg, charts = handle_cross_deps(chat_id)
+        combined_msg_parts.append(msg)
+        combined_charts.extend(charts)
+    except Exception as e:
+        combined_msg_parts.append(f"⚠️ **Кросс-зависимости:** Ошибка при построении ({e})")
+
+    # 3. Запрашиваем матрицу рассеяния
+    try:
+        msg, charts = handle_pairplot_mock(chat_id)
+        combined_msg_parts.append(msg)
+        combined_charts.extend(charts)
+    except Exception as e:
+        combined_msg_parts.append(f"⚠️ **Матрица рассеяния:** Ошибка при построении ({e})")
+
+    # Склеиваем все текстовые сообщения через горизонтальную линию Markdown
+    final_msg = "\n\n---\n\n".join(combined_msg_parts)
+    
+    return final_msg, combined_charts
+
+@register_mock(MockCommands.FEATURE_IMPORTACES.value)
+def handle_feature_importances(chat_id: str, col: str):
+    # col1 и col2 прилетят прямо из регулярного выражения!
+    data = get_feature_importances(chat_id, col)
+    msg = mock_feature_importances_report(data)
+    charts = [{"type": "feature_importances", "data": data}]
     return msg, charts
