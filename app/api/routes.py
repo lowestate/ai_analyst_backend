@@ -9,7 +9,7 @@ from app.api.schemas import (
 from app.services.dataset import process_upload
 from app.core.config import logger
 from app.agent.graph import get_graph
-from app.agent.initial_invoke import generate_initial_metadata, USE_MOCK_ANSWERS
+from app.agent.initial_invoke import generate_initial_metadata
 from app.agent.mock_handlers import MOCK_REGISTRY, MockCommands
 
 from app.db.database import redis_client
@@ -52,6 +52,7 @@ async def upload_dataset(file: UploadFile = File(...)):
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat_interaction(req: ChatRequest):
+    logger.info(f"new request: {req}")
     config = {
         "configurable": {
             "thread_id": req.chat_id,
@@ -63,7 +64,7 @@ async def chat_interaction(req: ChatRequest):
     
     user_message = req.message
     
-    if USE_MOCK_ANSWERS:
+    if not req.use_ai:
         logger.info("MOCK MODE: Перехват запроса чата")
         
         # Убираем пробелы и знаки препинания на конце, которые юзер мог случайно поставить

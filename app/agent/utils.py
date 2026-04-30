@@ -1,38 +1,43 @@
 import pandas as pd
 from io import StringIO
+from functools import wraps
 
 from app.db.database import redis_client
 
-def remove_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Очищает датафрейм от колонок с датами (явных и скрытых в строках)."""
-    df_filtered = df.copy()
-    
-    # 1. Удаляем колонки с явным типом datetime
-    datetime_cols = df_filtered.select_dtypes(include=['datetime', 'datetimetz']).columns
-    df_filtered = df_filtered.drop(columns=datetime_cols)
-    
-    # 2. Ищем "скрытые" даты в текстовых колонках
-    object_cols = df_filtered.select_dtypes(include=['object', 'string']).columns
-    cols_to_drop = []
-    
-    for col in object_cols:
-        non_null_series = df_filtered[col].dropna()
-        if len(non_null_series) == 0:
-            continue
+def remove_datetime_columns(func):
+    """Декоратор: Очищает датафрейм от колонок с датами"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        df = func(*args, **kwargs)
+        
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("Декоратор remove_datetime_columns ожидает функцию, возвращающую DataFrame")
             
-        # Защита: проверяем, не являются ли данные числами в виде строк
-        # (чтобы '123' не интерпретировалось как миллисекунды даты)
-        sample = non_null_series.sample(min(100, len(non_null_series)))
-        if pd.to_numeric(sample, errors='coerce').notna().mean() > 0.8:
-            continue
-            
-        # Пытаемся конвертировать сэмпл в даты
-        # Если более 80% значений распознались как дата — считаем колонку датой
-        converted = pd.to_datetime(sample, errors='coerce')
-        if converted.notna().mean() > 0.8:
-            cols_to_drop.append(col)
-            
-    return df_filtered.drop(columns=cols_to_drop)
+        df_filtered = df.copy()
+        
+        # 1. Удаляем колонки с явным типом datetime
+        datetime_cols = df_filtered.select_dtypes(include=['datetime', 'datetimetz']).columns
+        df_filtered = df_filtered.drop(columns=datetime_cols)
+        
+        # 2. Ищем "скрытые" даты в текстовых колонках
+        object_cols = df_filtered.select_dtypes(include=['object', 'string']).columns
+        cols_to_drop = []
+        
+        for col in object_cols:
+            non_null_series = df_filtered[col].dropna()
+            if len(non_null_series) == 0:
+                continue
+                
+            sample = non_null_series.sample(min(100, len(non_null_series)))
+            if pd.to_numeric(sample, errors='coerce').notna().mean() > 0.8:
+                continue
+                
+            converted = pd.to_datetime(sample, errors='coerce')
+            if converted.notna().mean() > 0.8:
+                cols_to_drop.append(col)
+                
+        return df_filtered.drop(columns=cols_to_drop)
+    return wrapper
 
 def get_df_from_redis(chat_id: str) -> pd.DataFrame:
     """Вспомогательная функция для извлечения датасета из Redis"""
@@ -40,3 +45,45 @@ def get_df_from_redis(chat_id: str) -> pd.DataFrame:
     if not data_str:
         raise ValueError("Данные устарели или не найдены в кэше.")
     return pd.read_json(StringIO(data_str), orient='split')
+
+def remove_outliers_iqr(columns=None):
+    """Декоратор: Удаляет выбросы по методу Тьюки (IQR)"""
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Получаем датафрейм из обернутой функции
+            df = func(*args, **kwargs)
+            
+            if not isinstance(df, pd.DataFrame):
+                raise TypeError("Декоратор remove_outliers_iqr ожидает функцию, возвращающую DataFrame")
+                
+            df_clean = df.copy()
+            cols_to_clean = columns if columns else df_clean.select_dtypes(include=['number']).columns
+            
+            for col in cols_to_clean:
+                q1 = df_clean[col].quantile(0.25)
+                q3 = df_clean[col].quantile(0.75)
+                iqr = q3 - q1
+                lower_bound = q1 - 1.5 * iqr
+                upper_bound = q3 + 1.5 * iqr
+                df_clean = df_clean[(df_clean[col] >= lower_bound) & (df_clean[col] <= upper_bound)]
+            
+            return df_clean
+        return wrapper
+    return decorator
+
+@remove_outliers_iqr()
+@remove_datetime_columns
+def remove_outliers_and_dates(chat_id: str) -> pd.DataFrame:
+    """Для базовой статистики и линейных корреляций: без дат и выбросов"""
+    return get_df_from_redis(chat_id)
+
+@remove_datetime_columns
+def remove_dates(chat_id: str) -> pd.DataFrame:
+    """Для графов связей и зависимостей: без дат, но с выбросами"""
+    return get_df_from_redis(chat_id)
+
+@remove_outliers_iqr()
+def remove_outliers(chat_id: str) -> pd.DataFrame:
+    """Для трендов: оставляем даты, но сглаживаем выбросы"""
+    return get_df_from_redis(chat_id)

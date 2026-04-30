@@ -12,6 +12,7 @@ class ChatCreateResponse(BaseModel):
 class ChatRequest(BaseModel):
     chat_id: str
     message: str
+    use_ai: bool
 
 
 class ChartData(BaseModel):

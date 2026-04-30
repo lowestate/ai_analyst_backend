@@ -3,22 +3,24 @@ import pandas as pd
 
 from app.agent.utils import (
     get_df_from_redis,
-    remove_datetime_columns
+    remove_outliers_and_dates,
+    remove_dates,
+    remove_outliers
 )
+
 
 def get_correlation_data(chat_id: str) -> dict:
     """Чистая бизнес-логика вычисления корреляции, независимая от LangGraph"""
-    df = get_df_from_redis(chat_id)
-    df = remove_datetime_columns(df) # <-- Очищаем от дат
-    df_encoded = df.copy()
+    # Используем провайдер: получаем уже очищенный от дат и выбросов датафрейм
+    df_encoded = remove_outliers_and_dates(chat_id)
     
     for col in df_encoded.select_dtypes(exclude=['number']).columns:
         df_encoded[col] = pd.factorize(df_encoded[col])[0]
     return df_encoded.corr().round(3).to_dict()
 
 def get_column_stats_data(chat_id: str) -> dict:
-    df = get_df_from_redis(chat_id)
-    df = remove_datetime_columns(df) # <-- Очищаем от дат
+    # Используем провайдер: получаем уже очищенный датафрейм
+    df = remove_outliers_and_dates(chat_id)
     
     numeric_cols = df.select_dtypes(include=['number']).columns
     cat_cols = df.select_dtypes(exclude=['number']).columns
@@ -51,7 +53,7 @@ def get_column_stats_data(chat_id: str) -> dict:
         vals = df[col].dropna()
         if len(vals) > 0:
             counts, bin_edges = np.histogram(vals, bins='auto')
-            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2 # Центры столбцов для графика
+            bin_centers = (bin_edges[:-1] + bin_edges[1:]) / 2 
             numeric_charts[col] = {
                 "x": np.round(bin_centers, 2).tolist(),
                 "y": counts.tolist()
@@ -65,7 +67,8 @@ def get_column_stats_data(chat_id: str) -> dict:
     }
 
 def get_outliers_data(chat_id: str) -> dict:
-    df = get_df_from_redis(chat_id)
+    # ЗДЕСЬ ОСТАВЛЯЕМ СЫРОЙ РЕДИС: если убрать аномалии, детекция найдет 0 аномалий
+    df = get_df_from_redis(chat_id) 
     numeric_cols = df.select_dtypes(include=['number']).columns
     
     stats = {}
@@ -97,15 +100,15 @@ def get_outliers_data(chat_id: str) -> dict:
                 "type": "outliers",
                 "data": {
                     "column_name": col,
-                    "y": s.tolist() # Отправляем массив для Boxplot
+                    "y": s.tolist() 
                 }
             })
             
     return {"stats": stats, "charts": charts}
 
 def get_cross_dependencies_data(chat_id: str) -> dict:
-    df = get_df_from_redis(chat_id)
-    df = remove_datetime_columns(df) # <-- Очищаем от дат
+    # Используем провайдер: оставляем аномалии (Спирмену на них все равно), но убираем даты
+    df = remove_dates(chat_id)
     cols = df.columns
     
     # Хак для смешанных данных: факторизуем категории в числа и считаем ранговую корреляцию
@@ -131,8 +134,9 @@ def get_cross_dependencies_data(chat_id: str) -> dict:
     }
 
 def get_trend_data(chat_id: str) -> dict:
-    df = get_df_from_redis(chat_id).copy()
-
+    # Используем провайдер: даты остаются, выбросы убираются
+    df = remove_outliers(chat_id)
+    
     # --- 1. ПОИСК КОЛОНКИ С ДАТОЙ ---
     date_col = None
     dt_cols = df.select_dtypes(include=['datetime', 'datetimetz']).columns
@@ -150,25 +154,18 @@ def get_trend_data(chat_id: str) -> dict:
             date_col = df.columns[0]
             
     # --- 2. БРОНЕБОЙНАЯ КОНВЕРТАЦИЯ ---
-    # Проверяем, не является ли колонка УЖЕ форматом времени
     if not pd.api.types.is_datetime64_any_dtype(df[date_col]):
-        # Пытаемся перевести все строки в числа (например, '41470.166' станет float)
         numeric_vals = pd.to_numeric(df[date_col], errors='coerce')
-        
-        # Находим те ячейки, которые попадают в диапазон дат Excel (примерно 1927 - 2173 года)
         is_excel = (numeric_vals > 10000) & (numeric_vals < 100000)
-        
-        # Создаем базовую маску: пытаемся распарсить как обычный текст/timestamp
         parsed_dates = pd.to_datetime(df[date_col].astype(str), errors='coerce')
         
-        # Точечно (векторизованно) перезаписываем те ячейки, которые оказались Excel-числами
         if is_excel.any():
             parsed_dates.loc[is_excel] = pd.to_datetime(numeric_vals[is_excel], unit='D', origin='1899-12-30')
             
         df[date_col] = parsed_dates
 
     # --- 3. ОЧИСТКА И ФОРМАТИРОВАНИЕ ---
-    # Выкидываем пустые значения (NaT), из-за которых график может упасть
+    # Ручной вызов remove_outliers_iqr отсюда убран, так как он отработал в remove_outliers
     df = df.dropna(subset=[date_col])
     df = df.sort_values(by=date_col)
 
@@ -177,8 +174,6 @@ def get_trend_data(chat_id: str) -> dict:
     if not numeric_cols:
         raise ValueError("В датасете нет числовых признаков для построения трендов.")
 
-    # Форматируем в идеальную строку. 
-    # Фронтенд (календарики От и До) ожидает строгий формат, поэтому отдаем ему четкие данные.
     x_data = df[date_col].dt.strftime('%Y-%m-%d %H:%M:%S').tolist() 
     y_data = {col: df[col].fillna(0).tolist() for col in numeric_cols}
 
@@ -190,10 +185,9 @@ def get_trend_data(chat_id: str) -> dict:
     }
 
 def get_dependency_data(chat_id: str, col1: str, col2: str) -> dict:
-    df = get_df_from_redis(chat_id).copy()
-    df = remove_datetime_columns(df)
+    # Используем провайдер: убираем даты, чтобы они не мешали графикам рассеяния
+    df = remove_dates(chat_id)
     
-    # Умный поиск оригинальных названий колонок без учета регистра
     col_map = {c.lower(): c for c in df.columns}
     
     real_col1 = col_map.get(col1.lower())
@@ -202,11 +196,8 @@ def get_dependency_data(chat_id: str, col1: str, col2: str) -> dict:
     if not real_col1 or not real_col2:
         raise ValueError(f"Колонки '{col1}' или '{col2}' не найдены в датасете.")
 
-    # Убираем пропуски по этим двум колонкам
     df = df.dropna(subset=[col1, col2])
 
-    # Эвристика: как понять, что признак категориальный?
-    # Если это текст (object/string) ИЛИ если это числа, но их уникальных значений меньше 15 (например, классы 1,2,3)
     def is_categorical(series):
         return pd.api.types.is_object_dtype(series) or series.nunique() < 15
 
@@ -215,31 +206,25 @@ def get_dependency_data(chat_id: str, col1: str, col2: str) -> dict:
 
     result = {"col1": col1, "col2": col2}
 
-    # СЦЕНАРИЙ 1: ЧИСЛО vs ЧИСЛО -> Scatter Plot (Диаграмма рассеяния)
     if not col1_is_cat and not col2_is_cat:
-        # Берем семпл, чтобы фронтенд не завис от 1 миллиона точек
         if len(df) > 2000:
             df = df.sample(2000, random_state=42)
         
         result["sub_type"] = "scatter"
-        result["x"] = df[col2].tolist() # От чего зависит (ось X)
-        result["y"] = df[col1].tolist() # Что зависит (ось Y)
+        result["x"] = df[col2].tolist() 
+        result["y"] = df[col1].tolist() 
 
-    # СЦЕНАРИЙ 2: КАТЕГОРИЯ vs КАТЕГОРИЯ -> Heatmap (Матрица сопряженности)
     elif col1_is_cat and col2_is_cat:
-        # pd.crosstab считает количество пересечений (например, сколько мужчин купили товар А)
         ct = pd.crosstab(df[col1], df[col2])
         result["sub_type"] = "heatmap"
         result["x"] = ct.columns.astype(str).tolist()
         result["y"] = ct.index.astype(str).tolist()
         result["z"] = ct.values.tolist()
 
-    # СЦЕНАРИЙ 3: ЧИСЛО vs КАТЕГОРИЯ -> Box Plot (Ящик с усами)
     else:
         cat_col = col1 if col1_is_cat else col2
         num_col = col2 if col1_is_cat else col1
 
-        # Ограничиваем количество категорий топом, чтобы график не превратился в кашу
         top_cats = df[cat_col].value_counts().nlargest(12).index
         df = df[df[cat_col].isin(top_cats)]
 
@@ -253,6 +238,7 @@ def get_dependency_data(chat_id: str, col1: str, col2: str) -> dict:
     return result
 
 def get_pairplot_data(chat_id: str) -> dict:
+    # ЗДЕСЬ ОСТАВЛЯЕМ СЫРОЙ РЕДИС: для Pairplot (матрицы рассеяния) выбросы важны визуально
     df = get_df_from_redis(chat_id).copy()
     
     num_cols = df.select_dtypes(include=['number']).columns.tolist()
@@ -260,18 +246,15 @@ def get_pairplot_data(chat_id: str) -> dict:
     if len(num_cols) < 2:
         raise ValueError("Для матрицы рассеяния нужно минимум 2 числовых признака.")
         
-    # Определяем топ-5 самых вариативных для выбора по умолчанию
     if len(num_cols) > 5:
         default_cols = df[num_cols].var().nlargest(5).index.tolist()
     else:
         default_cols = num_cols
 
-    # Убираем строки с пропусками и сэмплируем до 500 точек, чтобы браузер не завис
     df = df.dropna(subset=num_cols)
     if len(df) > 500:
         df = df.sample(n=500, random_state=42)
 
-    # Формируем данные для ВСЕХ числовых колонок (чтобы юзер мог выбрать любые)
     dimensions = []
     for col in num_cols:
         dimensions.append({
