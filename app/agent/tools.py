@@ -3,7 +3,7 @@ from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 
 from app.core.config import logger
-from app.agent.utils import (
+from app.agent.base_analysis import (
     get_column_stats_data,
     get_correlation_data,
     get_outliers_data,

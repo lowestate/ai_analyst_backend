@@ -1,6 +1,6 @@
 from enum import Enum
 
-from app.agent.utils import (
+from app.agent.base_analysis import (
     get_correlation_data,
     get_column_stats_data,
     get_cross_dependencies_data,
