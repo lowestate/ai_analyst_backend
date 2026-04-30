@@ -8,7 +8,8 @@ from app.agent.base_analysis import (
     get_correlation_data,
     get_outliers_data,
     get_cross_dependencies_data,
-    get_trend_data
+    get_trend_data,
+    get_dependency_data
 )
 
 @tool
@@ -66,5 +67,15 @@ def analyze_trends(config: RunnableConfig) -> str:
     try:
         data = get_trend_data(chat_id)
         return json.dumps({"tool_type": "trend_line", "data": data})
+    except Exception as e:
+        return str(e)
+    
+@tool
+def analyze_dependency(col1: str, col2: str, config: RunnableConfig) -> str:
+    """Анализирует зависимость между двумя столбцами."""
+    chat_id = config["configurable"]["chat_id"] # type: ignore
+    try:
+        data = get_dependency_data(chat_id, col1, col2)
+        return json.dumps({"tool_type": "dependency", "data": data})
     except Exception as e:
         return str(e)

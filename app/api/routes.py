@@ -66,29 +66,31 @@ async def chat_interaction(req: ChatRequest):
     if USE_MOCK_ANSWERS:
         logger.info("MOCK MODE: Перехват запроса чата")
         
-        # .strip() уберет случайные пробелы в начале и конце, если юзер их случайно поставит
-        msg_lower = user_message.lower().strip() 
+        # Убираем пробелы и знаки препинания на конце, которые юзер мог случайно поставить
+        msg_clean = user_message.strip().strip('.?!') 
         
-        # Проверяем строгое совпадение: есть ли точный ключ в нашем реестре?
-        handler_func = MOCK_REGISTRY.get(msg_lower)
+        handler_func = None
+        extracted_args = () # Здесь будут лежать наши колонки
+        
+        # Перебираем все зарегистрированные паттерны в реестре
+        for pattern, func in MOCK_REGISTRY.items():
+            match = pattern.match(msg_clean)
+            if match:
+                handler_func = func
+                extracted_args = match.groups() 
+                break
         
         if handler_func:
-            # Если точное совпадение найдено — вызываем функцию
             try:
-                final_message, charts = handler_func(req.chat_id)
+                final_message, charts = handler_func(req.chat_id, *extracted_args)
+                
             except Exception as e:
-                logger.error(f"Ошибка мок-вычисления для '{msg_lower}': {str(e)}")
+                logger.error(f"Ошибка мок-вычисления для '{msg_clean}': {str(e)}")
                 final_message = f"Ошибка вычисления инструмента: {str(e)}"
                 charts = []
         else:
-            # Если юзер написал что-то другое
             final_message = (
-                "Это мок-режим 🤖. Я реагирую только на точные команды:\n"
-                "- корреляционная матрица\n"
-                "- анализ столбцов\n"
-                "- аномалии\n"
-                "- кросс-зависимости"
-                "- тренд"
+                "Я не знаю такой команды в рамках мок-режима. Воспользуйтесь командами-подсказками над полем ввода"
             )
             charts = []
             

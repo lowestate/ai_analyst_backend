@@ -188,3 +188,99 @@ def get_trend_data(chat_id: str) -> dict:
         "x": x_data,
         "y": y_data
     }
+
+def get_dependency_data(chat_id: str, col1: str, col2: str) -> dict:
+    df = get_df_from_redis(chat_id).copy()
+    df = remove_datetime_columns(df)
+    
+    # Умный поиск оригинальных названий колонок без учета регистра
+    col_map = {c.lower(): c for c in df.columns}
+    
+    real_col1 = col_map.get(col1.lower())
+    real_col2 = col_map.get(col2.lower())
+
+    if not real_col1 or not real_col2:
+        raise ValueError(f"Колонки '{col1}' или '{col2}' не найдены в датасете.")
+
+    # Убираем пропуски по этим двум колонкам
+    df = df.dropna(subset=[col1, col2])
+
+    # Эвристика: как понять, что признак категориальный?
+    # Если это текст (object/string) ИЛИ если это числа, но их уникальных значений меньше 15 (например, классы 1,2,3)
+    def is_categorical(series):
+        return pd.api.types.is_object_dtype(series) or series.nunique() < 15
+
+    col1_is_cat = is_categorical(df[col1])
+    col2_is_cat = is_categorical(df[col2])
+
+    result = {"col1": col1, "col2": col2}
+
+    # СЦЕНАРИЙ 1: ЧИСЛО vs ЧИСЛО -> Scatter Plot (Диаграмма рассеяния)
+    if not col1_is_cat and not col2_is_cat:
+        # Берем семпл, чтобы фронтенд не завис от 1 миллиона точек
+        if len(df) > 2000:
+            df = df.sample(2000, random_state=42)
+        
+        result["sub_type"] = "scatter"
+        result["x"] = df[col2].tolist() # От чего зависит (ось X)
+        result["y"] = df[col1].tolist() # Что зависит (ось Y)
+
+    # СЦЕНАРИЙ 2: КАТЕГОРИЯ vs КАТЕГОРИЯ -> Heatmap (Матрица сопряженности)
+    elif col1_is_cat and col2_is_cat:
+        # pd.crosstab считает количество пересечений (например, сколько мужчин купили товар А)
+        ct = pd.crosstab(df[col1], df[col2])
+        result["sub_type"] = "heatmap"
+        result["x"] = ct.columns.astype(str).tolist()
+        result["y"] = ct.index.astype(str).tolist()
+        result["z"] = ct.values.tolist()
+
+    # СЦЕНАРИЙ 3: ЧИСЛО vs КАТЕГОРИЯ -> Box Plot (Ящик с усами)
+    else:
+        cat_col = col1 if col1_is_cat else col2
+        num_col = col2 if col1_is_cat else col1
+
+        # Ограничиваем количество категорий топом, чтобы график не превратился в кашу
+        top_cats = df[cat_col].value_counts().nlargest(12).index
+        df = df[df[cat_col].isin(top_cats)]
+
+        grouped = df.groupby(cat_col)[num_col].apply(list).to_dict()
+        result["sub_type"] = "box"
+        result["cat_col"] = cat_col
+        result["num_col"] = num_col
+        result["categories"] = list(grouped.keys())
+        result["values"] = list(grouped.values())
+
+    return result
+
+def get_pairplot_data(chat_id: str) -> dict:
+    df = get_df_from_redis(chat_id).copy()
+    
+    num_cols = df.select_dtypes(include=['number']).columns.tolist()
+    
+    if len(num_cols) < 2:
+        raise ValueError("Для матрицы рассеяния нужно минимум 2 числовых признака.")
+        
+    # Определяем топ-5 самых вариативных для выбора по умолчанию
+    if len(num_cols) > 5:
+        default_cols = df[num_cols].var().nlargest(5).index.tolist()
+    else:
+        default_cols = num_cols
+
+    # Убираем строки с пропусками и сэмплируем до 500 точек, чтобы браузер не завис
+    df = df.dropna(subset=num_cols)
+    if len(df) > 500:
+        df = df.sample(n=500, random_state=42)
+
+    # Формируем данные для ВСЕХ числовых колонок (чтобы юзер мог выбрать любые)
+    dimensions = []
+    for col in num_cols:
+        dimensions.append({
+            "label": col,
+            "values": df[col].tolist()
+        })
+
+    return {
+        "dimensions": dimensions,
+        "all_columns": num_cols,
+        "default_columns": default_cols
+    }
