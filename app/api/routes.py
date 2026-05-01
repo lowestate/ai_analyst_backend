@@ -83,7 +83,8 @@ async def chat_interaction(req: ChatRequest):
         
         if handler_func:
             try:
-                final_message, charts = handler_func(req.chat_id, *extracted_args)
+                # ВАЖНО: Передаем req.colsToRemove вторым аргументом (между chat_id и *extracted_args)
+                final_message, charts = handler_func(req.chat_id, req.cols_to_remove, *extracted_args)
                 
             except Exception as e:
                 logger.error(f"Ошибка мок-вычисления для '{msg_clean}': {str(e)}")

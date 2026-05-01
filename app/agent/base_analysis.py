@@ -1,6 +1,5 @@
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
 
 from app.agent.utils import (
     get_df_from_redis,
@@ -9,18 +8,20 @@ from app.agent.utils import (
     remove_outliers
 )
 
-def get_correlation_data(chat_id: str) -> dict:
+def get_correlation_data(chat_id: str, cols_to_remove: list[str] = []) -> dict:
     """Чистая бизнес-логика вычисления корреляции, независимая от LangGraph"""
     # Используем провайдер: получаем уже очищенный от дат и выбросов датафрейм
-    df_encoded = remove_outliers_and_dates(chat_id)
+    df_encoded = remove_dates(chat_id, cols_to_remove)
     
     for col in df_encoded.select_dtypes(exclude=['number']).columns:
         df_encoded[col] = pd.factorize(df_encoded[col])[0]
-    return df_encoded.corr().round(3).to_dict()
+        
+    # fillna(0) страхует от колонок с нулевой дисперсией, где корреляция дает NaN
+    return df_encoded.corr().fillna(0).round(3).to_dict()
 
-def get_column_stats_data(chat_id: str) -> dict:
+def get_column_stats_data(chat_id: str, cols_to_remove: list[str] = []) -> dict:
     # Используем провайдер: получаем уже очищенный датафрейм
-    df = remove_outliers_and_dates(chat_id)
+    df = remove_outliers_and_dates(chat_id, cols_to_remove)
     
     numeric_cols = df.select_dtypes(include=['number']).columns
     cat_cols = df.select_dtypes(exclude=['number']).columns
@@ -66,9 +67,9 @@ def get_column_stats_data(chat_id: str) -> dict:
         "numeric_charts": numeric_charts
     }
 
-def get_outliers_data(chat_id: str) -> dict:
+def get_outliers_data(chat_id: str, cols_to_remove: list[str] = []) -> dict:
     # ЗДЕСЬ ОСТАВЛЯЕМ СЫРОЙ РЕДИС: если убрать аномалии, детекция найдет 0 аномалий
-    df = get_df_from_redis(chat_id) 
+    df = get_df_from_redis(chat_id, cols_to_remove) 
     numeric_cols = df.select_dtypes(include=['number']).columns
     
     stats = {}
@@ -106,9 +107,9 @@ def get_outliers_data(chat_id: str) -> dict:
             
     return {"stats": stats, "charts": charts}
 
-def get_cross_dependencies_data(chat_id: str) -> dict:
+def get_cross_dependencies_data(chat_id: str, cols_to_remove: list[str] = []) -> dict:
     # Используем провайдер: оставляем аномалии (Спирмену на них все равно), но убираем даты
-    df = remove_dates(chat_id)
+    df = remove_dates(chat_id, cols_to_remove)
     cols = df.columns
     
     # Хак для смешанных данных: факторизуем категории в числа и считаем ранговую корреляцию
@@ -133,9 +134,9 @@ def get_cross_dependencies_data(chat_id: str) -> dict:
         "x": x_vals, "y": y_vals, "scores": scores, "matrix": corr.to_dict()
     }
 
-def get_trend_data(chat_id: str) -> dict:
+def get_trend_data(chat_id: str, cols_to_remove: list[str] = []) -> dict:
     # Используем провайдер: даты остаются, выбросы убираются
-    df = remove_outliers(chat_id)
+    df = remove_outliers(chat_id, cols_to_remove)
     
     # --- 1. ПОИСК КОЛОНКИ С ДАТОЙ ---
     date_col = None
@@ -184,9 +185,9 @@ def get_trend_data(chat_id: str) -> dict:
         "y": y_data
     }
 
-def get_dependency_data(chat_id: str, col1: str, col2: str) -> dict:
+def get_dependency_data(chat_id: str, col1: str, col2: str, cols_to_remove: list[str] = []) -> dict:
     # Используем провайдер: убираем даты, чтобы они не мешали графикам рассеяния
-    df = remove_dates(chat_id)
+    df = remove_dates(chat_id, cols_to_remove)
     
     col_map = {c.lower(): c for c in df.columns}
     
@@ -237,9 +238,9 @@ def get_dependency_data(chat_id: str, col1: str, col2: str) -> dict:
 
     return result
 
-def get_pairplot_data(chat_id: str) -> dict:
+def get_pairplot_data(chat_id: str, cols_to_remove: list[str] = []) -> dict:
     # ЗДЕСЬ ОСТАВЛЯЕМ СЫРОЙ РЕДИС: для Pairplot (матрицы рассеяния) выбросы важны визуально
-    df = get_df_from_redis(chat_id).copy()
+    df = get_df_from_redis(chat_id, cols_to_remove).copy()
     
     num_cols = df.select_dtypes(include=['number']).columns.tolist()
     
@@ -251,7 +252,12 @@ def get_pairplot_data(chat_id: str) -> dict:
     else:
         default_cols = num_cols
 
-    df = df.dropna(subset=num_cols)
+    # ИСПРАВЛЕНИЕ 4: ВМЕСТО df.dropna(subset=num_cols), который удалял 
+    # абсолютно все строки из-за одного пропуска, заполняем пропуски медианой!
+    for col in num_cols:
+        if df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].median())
+
     if len(df) > 500:
         df = df.sample(n=500, random_state=42)
 
@@ -268,7 +274,7 @@ def get_pairplot_data(chat_id: str) -> dict:
         "default_columns": default_cols
     }
 
-def get_all_relationships_data(chat_id: str) -> list[dict]:
+def get_all_relationships_data(chat_id: str, cols_to_remove: list[str] = []) -> list[dict]:
     """
     Агрегирует данные сразу для трех графиков взаимосвязей.
     """
@@ -276,31 +282,31 @@ def get_all_relationships_data(chat_id: str) -> list[dict]:
     
     # 1. Корреляционная матрица
     try:
-        corr_data = get_correlation_data(chat_id)
+        corr_data = get_correlation_data(chat_id, cols_to_remove)
         charts.append({"type": "correlation", "data": corr_data})
     except Exception as e:
         print(f"Ошибка при генерации correlation: {e}")
 
     # 2. Кросс-зависимости (Граф)
     try:
-        cross_data = get_cross_dependencies_data(chat_id)
+        cross_data = get_cross_dependencies_data(chat_id, cols_to_remove)
         charts.append({"type": "cross_deps", "data": cross_data})
     except Exception as e:
         print(f"Ошибка при генерации cross_deps: {e}")
 
     # 3. Матрица рассеяния (Pairplot)
     try:
-        pairplot_data = get_pairplot_data(chat_id)
+        pairplot_data = get_pairplot_data(chat_id, cols_to_remove)
         charts.append({"type": "pairplot", "data": pairplot_data})
     except Exception as e:
         print(f"Ошибка при генерации pairplot: {e}")
 
     return charts
 
-def get_feature_importances(chat_id: str, target_col: str) -> dict:
+def get_feature_importances(chat_id: str, target_col: str, cols_to_remove: list[str] = []) -> dict:
     """Вычисляет важность признаков для указанной целевой переменной с помощью Random Forest."""
     # Используем провайдер очищенных данных (без дат, без пропусков)
-    df = remove_dates(chat_id)
+    df = remove_dates(chat_id, cols_to_remove)
     
     col_map = {c.lower(): c for c in df.columns}
     real_target = col_map.get(target_col.lower())

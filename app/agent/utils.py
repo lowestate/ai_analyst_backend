@@ -1,6 +1,7 @@
 import pandas as pd
 from io import StringIO
 from functools import wraps
+import warnings
 
 from app.db.database import redis_client
 
@@ -32,19 +33,32 @@ def remove_datetime_columns(func):
             if pd.to_numeric(sample, errors='coerce').notna().mean() > 0.8:
                 continue
                 
-            converted = pd.to_datetime(sample, errors='coerce')
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                # format='mixed' помогает в pandas 2.0+ работать быстрее без ошибок
+                converted = pd.to_datetime(sample, errors='coerce', format='mixed')
+                
             if converted.notna().mean() > 0.8:
                 cols_to_drop.append(col)
                 
         return df_filtered.drop(columns=cols_to_drop)
     return wrapper
 
-def get_df_from_redis(chat_id: str) -> pd.DataFrame:
+def get_df_from_redis(chat_id: str, cols_to_remove: list = None) -> pd.DataFrame:
     """Вспомогательная функция для извлечения датасета из Redis"""
     data_str = redis_client.get(f"dataset:{chat_id}")
     if not data_str:
         raise ValueError("Данные устарели или не найдены в кэше.")
-    return pd.read_json(StringIO(data_str), orient='split')
+    
+    df = pd.read_json(StringIO(data_str), orient='split')
+    
+    # ИСКЛЮЧАЕМ СТОЛБЦЫ: Удаляем только те, что реально есть в датафрейме
+    if cols_to_remove:
+        existing_cols = [c for c in cols_to_remove if c in df.columns]
+        if existing_cols:
+            df = df.drop(columns=existing_cols)
+            
+    return df
 
 def remove_outliers_iqr(columns=None):
     """Декоратор: Удаляет выбросы по методу Тьюки (IQR)"""
@@ -74,16 +88,13 @@ def remove_outliers_iqr(columns=None):
 
 @remove_outliers_iqr()
 @remove_datetime_columns
-def remove_outliers_and_dates(chat_id: str) -> pd.DataFrame:
-    """Для базовой статистики и линейных корреляций: без дат и выбросов"""
-    return get_df_from_redis(chat_id)
+def remove_outliers_and_dates(chat_id: str, cols_to_remove: list = []) -> pd.DataFrame:
+    return get_df_from_redis(chat_id, cols_to_remove)
 
 @remove_datetime_columns
-def remove_dates(chat_id: str) -> pd.DataFrame:
-    """Для графов связей и зависимостей: без дат, но с выбросами"""
-    return get_df_from_redis(chat_id)
+def remove_dates(chat_id: str, cols_to_remove: list = []) -> pd.DataFrame:
+    return get_df_from_redis(chat_id, cols_to_remove)
 
 @remove_outliers_iqr()
-def remove_outliers(chat_id: str) -> pd.DataFrame:
-    """Для трендов: оставляем даты, но сглаживаем выбросы"""
-    return get_df_from_redis(chat_id)
+def remove_outliers(chat_id: str, cols_to_remove: list = []) -> pd.DataFrame:
+    return get_df_from_redis(chat_id, cols_to_remove)

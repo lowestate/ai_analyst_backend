@@ -13,6 +13,7 @@ class ChatRequest(BaseModel):
     chat_id: str
     message: str
     use_ai: bool
+    cols_to_remove: list[str] = []
 
 
 class ChartData(BaseModel):

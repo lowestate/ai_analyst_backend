@@ -16,7 +16,7 @@ def process_upload(file_obj, filename: str) -> tuple[str, str, dict, list]:
     cols_to_drop = []
     for col in df.columns:
         col_lower = str(col).lower()
-        if col_lower == 'id' or 'id_' in col_lower or '_id' in col_lower:
+        if col_lower == 'id' or 'id_' in col_lower or '_id' in col_lower or 'unnamed:' in col_lower:
             cols_to_drop.append(col)
             
     if cols_to_drop:

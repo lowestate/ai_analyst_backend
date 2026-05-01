@@ -48,15 +48,15 @@ def register_mock(command: str):
     return wrapper
 
 @register_mock(MockCommands.CORR_MATRIX.value)
-def handle_correlation(chat_id: str):
-    corr_data = get_correlation_data(chat_id)
+def handle_correlation(chat_id: str, cols_to_remove: list[str]):
+    corr_data = get_correlation_data(chat_id, cols_to_remove)
     msg = mock_correlation_report(corr_data)
     charts = [{"type": "correlation", "data": corr_data}]
     return msg, charts
 
 @register_mock(MockCommands.COLUMN_ANALYSIS.value)
-def handle_columns(chat_id: str):
-    stats_data = get_column_stats_data(chat_id)
+def handle_columns(chat_id: str, cols_to_remove: list[str]):
+    stats_data = get_column_stats_data(chat_id, cols_to_remove)
     msg = mock_column_report(stats_data)
     charts = []
     
@@ -75,38 +75,38 @@ def handle_columns(chat_id: str):
     return msg, charts
 
 @register_mock(MockCommands.ANOMALIES.value)
-def handle_outliers(chat_id: str):
-    outliers_data = get_outliers_data(chat_id)
+def handle_outliers(chat_id: str, cols_to_remove: list[str]):
+    outliers_data = get_outliers_data(chat_id, cols_to_remove)
     msg = mock_outliers_report(outliers_data)
     charts = outliers_data["charts"]
     return msg, charts
 
 @register_mock(MockCommands.CROSS_DEP.value)
-def handle_cross_deps(chat_id: str):
-    cross_data = get_cross_dependencies_data(chat_id)
+def handle_cross_deps(chat_id: str, cols_to_remove: list[str]):
+    cross_data = get_cross_dependencies_data(chat_id, cols_to_remove)
     msg = mock_cross_dependencies_report(cross_data)
     charts = [{"type": "cross_deps", "data": cross_data}]
     return msg, charts
 
 @register_mock(MockCommands.TREND.value)
-def handle_trends(chat_id: str):
-    trend_data = get_trend_data(chat_id)
+def handle_trends(chat_id: str, cols_to_remove: list[str]):
+    trend_data = get_trend_data(chat_id, cols_to_remove)
     msg = mock_trend_report(trend_data)
     # Оборачиваем данные в правильный формат для фронтенда
     charts = [{"type": "trend_line", "data": trend_data}] 
     return msg, charts
 
 @register_mock(MockCommands.DEPENDANCY.value)
-def handle_dependency_mock(chat_id: str, col1: str, col2: str):
+def handle_dependency_mock(chat_id: str, col1: str, col2: str, cols_to_remove: list[str]):
     # col1 и col2 прилетят прямо из регулярного выражения!
-    data = get_dependency_data(chat_id, col1, col2)
+    data = get_dependency_data(chat_id, col1, col2, cols_to_remove)
     msg = mock_dependency_report(data)
     charts = [{"type": "dependency", "data": data}]
     return msg, charts
 
 @register_mock(MockCommands.PAIRPLOT.value)
-def handle_pairplot_mock(chat_id: str):
-    data = get_pairplot_data(chat_id)
+def handle_pairplot_mock(chat_id: str, cols_to_remove: list[str]):
+    data = get_pairplot_data(chat_id, cols_to_remove)
     msg = (
         "**Матрица рассеяния (Pairplot)**\n\n"
         # ТУТ ИСПРАВЛЕНО: используем default_columns вместо columns
@@ -117,13 +117,13 @@ def handle_pairplot_mock(chat_id: str):
     return msg, charts
 
 @register_mock(MockCommands.ALL_RELATIONS.value)
-def handle_all_relationships(chat_id: str):
+def handle_all_relationships(chat_id: str, cols_to_remove: list[str]):
     combined_msg_parts = []
     combined_charts = []
 
     # 1. Запрашиваем корреляционную матрицу
     try:
-        msg, charts = handle_correlation(chat_id)
+        msg, charts = handle_correlation(chat_id, cols_to_remove)
         combined_msg_parts.append(msg)
         combined_charts.extend(charts)
     except Exception as e:
@@ -131,7 +131,7 @@ def handle_all_relationships(chat_id: str):
 
     # 2. Запрашиваем граф кросс-зависимостей
     try:
-        msg, charts = handle_cross_deps(chat_id)
+        msg, charts = handle_cross_deps(chat_id, cols_to_remove)
         combined_msg_parts.append(msg)
         combined_charts.extend(charts)
     except Exception as e:
@@ -139,7 +139,7 @@ def handle_all_relationships(chat_id: str):
 
     # 3. Запрашиваем матрицу рассеяния
     try:
-        msg, charts = handle_pairplot_mock(chat_id)
+        msg, charts = handle_pairplot_mock(chat_id, cols_to_remove)
         combined_msg_parts.append(msg)
         combined_charts.extend(charts)
     except Exception as e:
@@ -151,9 +151,9 @@ def handle_all_relationships(chat_id: str):
     return final_msg, combined_charts
 
 @register_mock(MockCommands.FEATURE_IMPORTACES.value)
-def handle_feature_importances(chat_id: str, col: str):
+def handle_feature_importances(chat_id: str, col: str, cols_to_remove: list[str]):
     # col1 и col2 прилетят прямо из регулярного выражения!
-    data = get_feature_importances(chat_id, col)
+    data = get_feature_importances(chat_id, col, cols_to_remove)
     msg = mock_feature_importances_report(data)
     charts = [{"type": "feature_importances", "data": data}]
     return msg, charts
