@@ -4,21 +4,21 @@ from enum import Enum
 from app.agent.base_analysis import (
     get_correlation_data,
     get_column_stats_data,
-    get_cross_dependencies_data,
     get_outliers_data,
     get_trend_data,
     get_dependency_data,
     get_pairplot_data,
-    get_feature_importances
+    get_feature_importances,
+    get_feature_tree
 )
 from app.agent.mock import (
     mock_correlation_report,
     mock_column_report,
-    mock_cross_dependencies_report,
     mock_outliers_report,
     mock_trend_report,
     mock_dependency_report,
-    mock_feature_importances_report
+    mock_feature_importances_report,
+    mock_feature_tree_report
 )
 
 
@@ -27,10 +27,10 @@ class MockCommands(str, Enum):
     CORR_MATRIX = r"^корреляционная матрица$"
     COLUMN_ANALYSIS = r"^анализ столбцов$"
     ANOMALIES = r"^аномалии$"
-    CROSS_DEP = r"^кросс-зависимости$"
     TREND = r"^тренд$"
     PAIRPLOT = r"^связи признаков$"
     ALL_RELATIONS = r"^корреляционный анализ$"
+    FEATURE_TREE = r"^дерево признаков$"
 
     # ПАТТЕРН ДЛЯ ПЕРЕМЕННЫХ: 
     # Группа 1 ловит первый столбец, Группа 2 ловит второй столбец
@@ -81,13 +81,6 @@ def handle_outliers(chat_id: str, cols_to_remove: list[str]):
     charts = outliers_data["charts"]
     return msg, charts
 
-@register_mock(MockCommands.CROSS_DEP.value)
-def handle_cross_deps(chat_id: str, cols_to_remove: list[str]):
-    cross_data = get_cross_dependencies_data(chat_id, cols_to_remove)
-    msg = mock_cross_dependencies_report(cross_data)
-    charts = [{"type": "cross_deps", "data": cross_data}]
-    return msg, charts
-
 @register_mock(MockCommands.TREND.value)
 def handle_trends(chat_id: str, cols_to_remove: list[str]):
     trend_data = get_trend_data(chat_id, cols_to_remove)
@@ -129,14 +122,6 @@ def handle_all_relationships(chat_id: str, cols_to_remove: list[str]):
     except Exception as e:
         combined_msg_parts.append(f"⚠️ **Корреляционная матрица:** Ошибка при построении ({e})")
 
-    # 2. Запрашиваем граф кросс-зависимостей
-    try:
-        msg, charts = handle_cross_deps(chat_id, cols_to_remove)
-        combined_msg_parts.append(msg)
-        combined_charts.extend(charts)
-    except Exception as e:
-        combined_msg_parts.append(f"⚠️ **Кросс-зависимости:** Ошибка при построении ({e})")
-
     # 3. Запрашиваем матрицу рассеяния
     try:
         msg, charts = handle_pairplot_mock(chat_id, cols_to_remove)
@@ -156,4 +141,11 @@ def handle_feature_importances(chat_id: str, col: str, cols_to_remove: list[str]
     data = get_feature_importances(chat_id, col, cols_to_remove)
     msg = mock_feature_importances_report(data)
     charts = [{"type": "feature_importances", "data": data}]
+    return msg, charts
+
+@register_mock(MockCommands.FEATURE_TREE.value)
+def handle_feature_tree(chat_id: str, cols_to_remove: list[str]):
+    data = get_feature_tree(chat_id, cols_to_remove)
+    msg = mock_feature_tree_report(data)
+    charts = [{"type": "feature_tree", "data": data}]
     return msg, charts

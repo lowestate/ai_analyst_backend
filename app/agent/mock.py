@@ -95,25 +95,6 @@ def mock_outliers_report(data: dict) -> str:
         
     return report
 
-def mock_cross_dependencies_report(data: dict) -> str:
-    matrix = data.get("matrix", {})
-    report = "Глобальный анализ кросс-зависимостей признаков завершен.\n\n"
-    report += "Топ-5 самых сильных связей (исключая идентичные):\n"
-    
-    pairs = []
-    for c1, row in matrix.items():
-        for c2, val in row.items():
-            if c1 != c2 and (c2, c1, val) not in pairs: # Убираем дубликаты и диагональ
-                pairs.append((c1, c2, val))
-                
-    pairs.sort(key=lambda x: x[2], reverse=True)
-    
-    for c1, c2, val in pairs[:5]:
-        strength = "Очень сильная" if val > 0.8 else "Сильная" if val > 0.6 else "Умеренная"
-        report += f"- **{c1}** ↔ **{c2}**: показатель {val} ({strength})\n"
-        
-    return report
-
 def mock_trend_report(data: dict) -> str:
     date_col = data.get("date_col", "Неизвестно")
     cols = data.get("numeric_cols", [])
@@ -169,4 +150,13 @@ def mock_feature_importances_report(data: dict) -> str:
     for f, imp in zip(features, importances):
         msg += f"- **{f}**: {int(imp * 100)}%\n"
 
+    return msg
+
+def mock_feature_tree_report(data: dict) -> str:
+    msg = (
+        "**Дендрограмма признаков (Кластеризация)**\n\n"
+        "Этот график показывает, как параметры группируются на основе их взаимной связи. "
+        "Чем ниже по вертикальной оси сливаются ветви двух признаков, тем сильнее они похожи (дублируют друг друга). "
+        "Используйте эту информацию, чтобы удалить лишние переменные перед построением ML-моделей или выявить неочевидные смысловые кластеры в данных."
+    )
     return msg

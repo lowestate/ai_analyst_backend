@@ -1,5 +1,7 @@
 import numpy as np
 import pandas as pd
+from scipy.cluster import hierarchy
+from scipy.spatial.distance import squareform
 
 from app.agent.utils import (
     get_df_from_redis,
@@ -106,33 +108,6 @@ def get_outliers_data(chat_id: str, cols_to_remove: list[str] = []) -> dict:
             })
             
     return {"stats": stats, "charts": charts}
-
-def get_cross_dependencies_data(chat_id: str, cols_to_remove: list[str] = []) -> dict:
-    # Используем провайдер: оставляем аномалии (Спирмену на них все равно), но убираем даты
-    df = remove_dates(chat_id, cols_to_remove)
-    cols = df.columns
-    
-    # Хак для смешанных данных: факторизуем категории в числа и считаем ранговую корреляцию
-    df_numeric = pd.DataFrame()
-    for c in cols:
-        if df[c].dtype == 'object' or df[c].dtype.name == 'category':
-            df_numeric[c] = df[c].factorize()[0]
-        else:
-            df_numeric[c] = df[c]
-            
-    # Спирмен отлично ловит нелинейные и категориальные ассоциации
-    corr = df_numeric.corr(method='spearman').abs().fillna(0).round(2)
-    
-    x_vals, y_vals, scores = [], [], []
-    for c1 in corr.columns:
-        for c2 in corr.columns:
-            x_vals.append(c1)
-            y_vals.append(c2)
-            scores.append(float(corr.loc[c1, c2]))
-            
-    return {
-        "x": x_vals, "y": y_vals, "scores": scores, "matrix": corr.to_dict()
-    }
 
 def get_trend_data(chat_id: str, cols_to_remove: list[str] = []) -> dict:
     # Используем провайдер: даты остаются, выбросы убираются
@@ -280,21 +255,18 @@ def get_all_relationships_data(chat_id: str, cols_to_remove: list[str] = []) -> 
     """
     charts = []
     
-    # 1. Корреляционная матрица
     try:
         corr_data = get_correlation_data(chat_id, cols_to_remove)
         charts.append({"type": "correlation", "data": corr_data})
     except Exception as e:
         print(f"Ошибка при генерации correlation: {e}")
 
-    # 2. Кросс-зависимости (Граф)
     try:
-        cross_data = get_cross_dependencies_data(chat_id, cols_to_remove)
-        charts.append({"type": "cross_deps", "data": cross_data})
+        feature_tree = get_feature_tree(chat_id, cols_to_remove)
+        charts.append({"type": "feature_tree", "data": feature_tree})
     except Exception as e:
-        print(f"Ошибка при генерации cross_deps: {e}")
+        print(f"Ошибка при генерации feature_tree: {e}")
 
-    # 3. Матрица рассеяния (Pairplot)
     try:
         pairplot_data = get_pairplot_data(chat_id, cols_to_remove)
         charts.append({"type": "pairplot", "data": pairplot_data})
@@ -363,4 +335,42 @@ def get_feature_importances(chat_id: str, target_col: str, cols_to_remove: list[
         "target": real_target,
         "features": imp_df['feature'].tolist(),
         "importances": np.round(imp_df['importance'], 4).tolist()
+    }
+
+def get_feature_tree(chat_id: str, cols_to_remove: list[str] = None) -> dict:
+    """Строит иерархическое дерево признаков на основе корреляции"""
+    # Берем данные без дат (с ними корреляция не работает)
+    df = remove_dates(chat_id, cols_to_remove)
+    
+    # Факторизуем категориальные переменные (переводим в числа)
+    for col in df.select_dtypes(exclude=['number']).columns:
+        df[col] = pd.factorize(df[col])[0]
+        
+    # Заполняем пропуски медианой, чтобы не терять строки
+    for col in df.columns:
+        if df[col].isnull().any():
+            df[col] = df[col].fillna(df[col].median())
+            
+    # Вычисляем матрицу корреляций
+    corr = df.corr().fillna(0)
+    
+    # Превращаем корреляцию в "дистанцию" (1 - abs(corr)). 
+    # Чем сильнее связь (неважно, прямая или обратная), тем ближе признаки.
+    distances = 1 - corr.abs().values
+    np.fill_diagonal(distances, 0)
+    distances = np.clip(distances, 0, 1) # Защита от микроскопических погрешностей < 0
+    
+    # Сжимаем матрицу в 1D массив для scipy
+    dist_array = squareform(distances)
+    
+    # Строим дерево методом Уорда (Ward variance minimization)
+    Z = hierarchy.linkage(dist_array, method='ward')
+    
+    # Генерируем координаты для отрисовки графиков без самого рисования matplotlib (no_plot=True)
+    dendro = hierarchy.dendrogram(Z, labels=corr.columns, no_plot=True)
+    
+    return {
+        "icoord": dendro['icoord'], # X координаты линий
+        "dcoord": dendro['dcoord'], # Y координаты линий
+        "ivl": dendro['ivl'],       # Имена признаков (листьев) в правильном порядке
     }

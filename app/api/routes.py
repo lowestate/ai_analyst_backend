@@ -11,7 +11,7 @@ from app.core.config import logger
 from app.agent.graph import get_graph
 from app.agent.initial_invoke import generate_initial_metadata
 from app.agent.mock_handlers import MOCK_REGISTRY, MockCommands
-
+from app.agent.utils import serialize
 from app.db.database import redis_client
 assert redis_client is not None, "Redis client must be initialized"
 
@@ -83,9 +83,8 @@ async def chat_interaction(req: ChatRequest):
         
         if handler_func:
             try:
-                # ВАЖНО: Передаем req.colsToRemove вторым аргументом (между chat_id и *extracted_args)
                 final_message, charts = handler_func(req.chat_id, req.cols_to_remove, *extracted_args)
-                
+                charts = serialize(charts)
             except Exception as e:
                 logger.error(f"Ошибка мок-вычисления для '{msg_clean}': {str(e)}")
                 final_message = f"Ошибка вычисления инструмента: {str(e)}"

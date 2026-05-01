@@ -1,48 +1,58 @@
+import math
 import pandas as pd
+import numpy as np
 from io import StringIO
 from functools import wraps
 import warnings
+from datetime import datetime, date
 
 from app.db.database import redis_client
 
-def remove_datetime_columns(func):
-    """Декоратор: Очищает датафрейм от колонок с датами"""
-    @wraps(func)
-    def wrapper(*args, **kwargs):
-        df = func(*args, **kwargs)
+def serialize(obj):
+    """
+    Рекурсивно обходит объект и конвертирует все Numpy и Pandas типы 
+    в стандартные типы Python (int, float, list, str, None).
+    """
+    # Если это словарь - рекурсивно обрабатываем ключи и значения
+    if isinstance(obj, dict):
+        return {str(k): serialize(v) for k, v in obj.items()}
+    
+    # Если это список, кортеж или множество - рекурсивно обрабатываем элементы
+    elif isinstance(obj, (list, tuple, set)):
+        return [serialize(v) for v in obj]
+    
+    # Если это Numpy массив - превращаем в список и прогоняем через сериализатор
+    elif isinstance(obj, np.ndarray):
+        return serialize(obj.tolist())
+    
+    # Если это скалярный тип Numpy (np.float64, np.int64, np.bool_ и т.д.)
+    elif isinstance(obj, np.generic):
+        item = obj.item()
+        # Если это NaN (Not a Number), превращаем в None (null в JSON)
+        if isinstance(item, float) and math.isnan(item):
+            return None
+        return item
+    
+    # Если случайно прилетел DataFrame или Series
+    elif isinstance(obj, pd.DataFrame):
+        return serialize(obj.to_dict(orient='records'))
+    elif isinstance(obj, pd.Series):
+        return serialize(obj.tolist())
+    
+    # Обработка дат
+    elif isinstance(obj, (datetime, date)):
+        return obj.isoformat()
+    
+    # Обработка NaN из стандартного Python
+    elif isinstance(obj, float) and math.isnan(obj):
+        return None
         
-        if not isinstance(df, pd.DataFrame):
-            raise TypeError("Декоратор remove_datetime_columns ожидает функцию, возвращающую DataFrame")
-            
-        df_filtered = df.copy()
-        
-        # 1. Удаляем колонки с явным типом datetime
-        datetime_cols = df_filtered.select_dtypes(include=['datetime', 'datetimetz']).columns
-        df_filtered = df_filtered.drop(columns=datetime_cols)
-        
-        # 2. Ищем "скрытые" даты в текстовых колонках
-        object_cols = df_filtered.select_dtypes(include=['object', 'string']).columns
-        cols_to_drop = []
-        
-        for col in object_cols:
-            non_null_series = df_filtered[col].dropna()
-            if len(non_null_series) == 0:
-                continue
-                
-            sample = non_null_series.sample(min(100, len(non_null_series)))
-            if pd.to_numeric(sample, errors='coerce').notna().mean() > 0.8:
-                continue
-                
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                # format='mixed' помогает в pandas 2.0+ работать быстрее без ошибок
-                converted = pd.to_datetime(sample, errors='coerce', format='mixed')
-                
-            if converted.notna().mean() > 0.8:
-                cols_to_drop.append(col)
-                
-        return df_filtered.drop(columns=cols_to_drop)
-    return wrapper
+    # Обработка специфичных Pandas пропусков (pd.NA, NaT)
+    elif pd.isna(obj):
+        return None
+
+    # Возвращаем стандартные типы (int, str, bool, обычный float) как есть
+    return obj
 
 def get_df_from_redis(chat_id: str, cols_to_remove: list = None) -> pd.DataFrame:
     """Вспомогательная функция для извлечения датасета из Redis"""
@@ -85,6 +95,45 @@ def remove_outliers_iqr(columns=None):
             return df_clean
         return wrapper
     return decorator
+
+def remove_datetime_columns(func):
+    """Декоратор: Очищает датафрейм от колонок с датами"""
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        df = func(*args, **kwargs)
+        
+        if not isinstance(df, pd.DataFrame):
+            raise TypeError("Декоратор remove_datetime_columns ожидает функцию, возвращающую DataFrame")
+            
+        df_filtered = df.copy()
+        
+        # 1. Удаляем колонки с явным типом datetime
+        datetime_cols = df_filtered.select_dtypes(include=['datetime', 'datetimetz']).columns
+        df_filtered = df_filtered.drop(columns=datetime_cols)
+        
+        # 2. Ищем "скрытые" даты в текстовых колонках
+        object_cols = df_filtered.select_dtypes(include=['object', 'string']).columns
+        cols_to_drop = []
+        
+        for col in object_cols:
+            non_null_series = df_filtered[col].dropna()
+            if len(non_null_series) == 0:
+                continue
+                
+            sample = non_null_series.sample(min(100, len(non_null_series)))
+            if pd.to_numeric(sample, errors='coerce').notna().mean() > 0.8:
+                continue
+                
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                # format='mixed' помогает в pandas 2.0+ работать быстрее без ошибок
+                converted = pd.to_datetime(sample, errors='coerce', format='mixed')
+                
+            if converted.notna().mean() > 0.8:
+                cols_to_drop.append(col)
+                
+        return df_filtered.drop(columns=cols_to_drop)
+    return wrapper
 
 @remove_outliers_iqr()
 @remove_datetime_columns
