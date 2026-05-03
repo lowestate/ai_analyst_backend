@@ -1,7 +1,8 @@
+import logging
+import sys
 import os
 
 USE_REAL_REDIS = os.getenv("USE_REAL_REDIS", "0").lower() in ("1", "true")
-
 
 class DummyRedis:
     """Простая in-memory заглушка для локальной разработки без Docker/Redis"""
@@ -24,3 +25,21 @@ else:
     redis_client = DummyRedis()
 
 assert redis_client is not None, "Redis client must be initialized"
+
+def setup_logger():
+    logger = logging.getLogger("agent_backend")
+    logger.setLevel(logging.INFO)
+    
+    # Чтобы логи не дублировались, если логгер уже инициализирован
+    if not logger.handlers:
+        handler = logging.StreamHandler(sys.stdout)
+        formatter = logging.Formatter(
+            fmt="%(asctime)s | %(levelname)s | %(module)s | %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+        
+    return logger
+
+logger = setup_logger()

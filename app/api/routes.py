@@ -6,14 +6,15 @@ from app.api.schemas import (
     ChatRequest,
     ChatResponse
 )
-from app.services.dataset import process_upload
-from app.core.config import logger
-from app.agent.graph import get_graph
-from app.agent.initial_invoke import generate_initial_metadata
-from app.agent.mock_handlers import MOCK_REGISTRY, MockCommands
-from app.agent.utils import serialize
-from app.db.database import redis_client
+from app.config import logger, redis_client
+from app.agents.supervisor.mock_router import route_mock_request
 assert redis_client is not None, "Redis client must be initialized"
+from app.agents.graph import get_graph
+from app.agents.core.initial_invoke import generate_initial_metadata
+from app.agents.core.utils import process_upload, serialize
+from app.agents.data_analyst.mock.mock_handlers import DA_MOCK_REGISTRY, DAMockCommands
+from app.agents.finance_agent.mock.mock_handlers import FIN_MOCK_REGISTRY, FinMockCommands
+
 
 router = APIRouter()
 app_graph = get_graph()
@@ -60,21 +61,30 @@ async def chat_interaction(req: ChatRequest):
         }
     }
     app_graph.update_state(config, {"charts_payload": []})
-    logger.info("state updated")
     
     user_message = req.message
     
+    # --- ОБРАБОТКА МОК-РЕЖИМА ---
     if not req.use_ai:
         logger.info("MOCK MODE: Перехват запроса чата")
         
-        # Убираем пробелы и знаки препинания на конце, которые юзер мог случайно поставить
-        msg_clean = user_message.strip().strip('.?!') 
+        # 1. Роутер моков определяет агента и очищает тег [A]/[Ф]
+        target_agent, msg_clean = route_mock_request(user_message)
+        msg_clean = msg_clean.strip('.?!') 
         
         handler_func = None
-        extracted_args = () # Здесь будут лежать наши колонки
+        extracted_args = ()
         
-        # Перебираем все зарегистрированные паттерны в реестре
-        for pattern, func in MOCK_REGISTRY.items():
+        # 2. Выбираем реестр команд в зависимости от тега
+        if target_agent == "data_analyst":
+            active_registry = DA_MOCK_REGISTRY
+        elif target_agent == "finance_agent":
+            active_registry = FIN_MOCK_REGISTRY
+        else:
+            active_registry = DA_MOCK_REGISTRY
+            
+        # 3. Ищем команду
+        for pattern, func in active_registry.items():
             match = pattern.match(msg_clean)
             if match:
                 handler_func = func
@@ -86,17 +96,15 @@ async def chat_interaction(req: ChatRequest):
                 final_message, charts = handler_func(req.chat_id, req.cols_to_remove, *extracted_args)
                 charts = serialize(charts)
             except Exception as e:
-                logger.error(f"Ошибка мок-вычисления для '{msg_clean}': {str(e)}")
-                final_message = f"Ошибка вычисления инструмента: {str(e)}"
+                logger.error(f"Ошибка мок-вычисления: {str(e)}")
+                final_message = f"Ошибка вычисления: {str(e)}"
                 charts = []
         else:
-            final_message = (
-                "Я не знаю такой команды в рамках мок-режима. Воспользуйтесь командами-подсказками над полем ввода"
-            )
+            final_message = "Я не знаю такой команды в рамках мок-режима."
             charts = []
             
-        # Записываем мок-взаимодействие в память графа, чтобы история не порвалась
-        app_graph.update_state(config, { # type: ignore
+        # Сохраняем в историю
+        app_graph.update_state(config, {
             "messages": [
                 HumanMessage(content=user_message),
                 AIMessage(content=final_message)
@@ -106,8 +114,10 @@ async def chat_interaction(req: ChatRequest):
         
         return ChatResponse(reply=final_message, charts=charts)
 
+    # --- ОБРАБОТКА AI-РЕЖИМА ---
+    # Граф сам вызовет Супервизора, а затем нужного Агента
     inputs = {"messages": [HumanMessage(content=user_message)]}
-    final_state = app_graph.invoke(inputs, config=config)
+    final_state = await app_graph.ainvoke(inputs, config=config)
     
     raw_content = final_state["messages"][-1].content
     
@@ -134,5 +144,6 @@ async def get_available_mock_commands():
     """
     Возвращает список всех доступных моковых команд из Enum.
     """
-    # Достаем все значения (.value) из MockCommands
-    return {"commands": [cmd.value for cmd in MockCommands]}
+    da_commands = [cmd.value for cmd in DAMockCommands]
+    fin_commands = [cmd.value for cmd in FinMockCommands]
+    return {"commands": da_commands + fin_commands}

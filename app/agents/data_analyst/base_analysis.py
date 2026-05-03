@@ -3,7 +3,7 @@ import pandas as pd
 from scipy.cluster import hierarchy
 from scipy.spatial.distance import squareform
 
-from app.agent.utils import (
+from app.agents.core.utils import (
     get_df_from_redis,
     remove_outliers_and_dates,
     remove_dates,

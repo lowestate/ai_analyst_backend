@@ -1,12 +1,11 @@
 import os
 
-from app.agent.models import AgentModel, InitChatOutput
-from app.core.config import logger
-from app.agent.prompts import INITIAL_METADATA_PROMPT_TEMPLATE
+from app.agents.client import llm
+from app.agents.core.models import InitChatOutput
+from app.config import logger
+from app.agents.core.prompt import INITIAL_METADATA_PROMPT_TEMPLATE
 
 USE_MOCK_ANSWERS = bool(os.getenv("USE_MOCK_ANSWERS", "1"))
-
-agent_instance = AgentModel()
 
 async def generate_initial_metadata(filename: str, columns: list, stats: dict) -> InitChatOutput:
     if USE_MOCK_ANSWERS:
@@ -29,6 +28,7 @@ async def generate_initial_metadata(filename: str, columns: list, stats: dict) -
         columns=', '.join(columns), 
         stats=stats
     )
-    structured_llm = agent_instance.llm.with_structured_output(InitChatOutput)
+    llm_instance = llm()
+    structured_llm = llm_instance.with_structured_output(InitChatOutput)
     result = await structured_llm.ainvoke(prompt)
     return result # type: ignore

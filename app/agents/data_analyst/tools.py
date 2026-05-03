@@ -2,8 +2,8 @@ import json
 from langchain_core.tools import tool
 from langchain_core.runnables import RunnableConfig
 
-from app.core.config import logger
-from app.agent.base_analysis import (
+from app.config import logger
+from app.agents.data_analyst.base_analysis import (
     get_column_stats_data,
     get_correlation_data,
     get_outliers_data,

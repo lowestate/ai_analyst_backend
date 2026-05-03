@@ -1,7 +1,7 @@
 import re
 from enum import Enum
 
-from app.agent.base_analysis import (
+from app.agents.data_analyst.base_analysis import (
     get_correlation_data,
     get_column_stats_data,
     get_outliers_data,
@@ -11,7 +11,7 @@ from app.agent.base_analysis import (
     get_feature_importances,
     get_feature_tree
 )
-from app.agent.mock import (
+from app.agents.data_analyst.mock.mock_reports import (
     mock_correlation_report,
     mock_column_report,
     mock_outliers_report,
@@ -22,7 +22,7 @@ from app.agent.mock import (
 )
 
 
-class MockCommands(str, Enum):
+class DAMockCommands(str, Enum):
     # ^ означает начало строки, $ - конец строки (чтобы избежать ложных срабатываний)
     CORR_MATRIX = r"^корреляционная матрица$"
     COLUMN_ANALYSIS = r"^анализ столбцов$"
@@ -38,23 +38,23 @@ class MockCommands(str, Enum):
     FEATURE_IMPORTACES = r"^важность признаков для\s+(.+?)$"
 
 
-MOCK_REGISTRY = {}
+DA_MOCK_REGISTRY = {}
 
 def register_mock(command: str):
     def wrapper(func):
         # Компилируем регулярное выражение сразу при регистрации (re.IGNORECASE сделает его нечувствительным к регистру)
-        MOCK_REGISTRY[re.compile(command, re.IGNORECASE)] = func
+        DA_MOCK_REGISTRY[re.compile(command, re.IGNORECASE)] = func
         return func
     return wrapper
 
-@register_mock(MockCommands.CORR_MATRIX.value)
+@register_mock(DAMockCommands.CORR_MATRIX.value)
 def handle_correlation(chat_id: str, cols_to_remove: list[str]):
     corr_data = get_correlation_data(chat_id, cols_to_remove)
     msg = mock_correlation_report(corr_data)
     charts = [{"type": "correlation", "data": corr_data}]
     return msg, charts
 
-@register_mock(MockCommands.COLUMN_ANALYSIS.value)
+@register_mock(DAMockCommands.COLUMN_ANALYSIS.value)
 def handle_columns(chat_id: str, cols_to_remove: list[str]):
     stats_data = get_column_stats_data(chat_id, cols_to_remove)
     msg = mock_column_report(stats_data)
@@ -74,14 +74,14 @@ def handle_columns(chat_id: str, cols_to_remove: list[str]):
         
     return msg, charts
 
-@register_mock(MockCommands.ANOMALIES.value)
+@register_mock(DAMockCommands.ANOMALIES.value)
 def handle_outliers(chat_id: str, cols_to_remove: list[str]):
     outliers_data = get_outliers_data(chat_id, cols_to_remove)
     msg = mock_outliers_report(outliers_data)
     charts = outliers_data["charts"]
     return msg, charts
 
-@register_mock(MockCommands.TREND.value)
+@register_mock(DAMockCommands.TREND.value)
 def handle_trends(chat_id: str, cols_to_remove: list[str]):
     trend_data = get_trend_data(chat_id, cols_to_remove)
     msg = mock_trend_report(trend_data)
@@ -89,7 +89,7 @@ def handle_trends(chat_id: str, cols_to_remove: list[str]):
     charts = [{"type": "trend_line", "data": trend_data}] 
     return msg, charts
 
-@register_mock(MockCommands.DEPENDANCY.value)
+@register_mock(DAMockCommands.DEPENDANCY.value)
 def handle_dependency_mock(chat_id: str, col1: str, col2: str, cols_to_remove: list[str]):
     # col1 и col2 прилетят прямо из регулярного выражения!
     data = get_dependency_data(chat_id, col1, col2, cols_to_remove)
@@ -97,7 +97,7 @@ def handle_dependency_mock(chat_id: str, col1: str, col2: str, cols_to_remove: l
     charts = [{"type": "dependency", "data": data}]
     return msg, charts
 
-@register_mock(MockCommands.PAIRPLOT.value)
+@register_mock(DAMockCommands.PAIRPLOT.value)
 def handle_pairplot_mock(chat_id: str, cols_to_remove: list[str]):
     data = get_pairplot_data(chat_id, cols_to_remove)
     msg = (
@@ -109,7 +109,7 @@ def handle_pairplot_mock(chat_id: str, cols_to_remove: list[str]):
     charts = [{"type": "pairplot", "data": data}]
     return msg, charts
 
-@register_mock(MockCommands.ALL_RELATIONS.value)
+@register_mock(DAMockCommands.ALL_RELATIONS.value)
 def handle_all_relationships(chat_id: str, cols_to_remove: list[str]):
     combined_msg_parts = []
     combined_charts = []
@@ -135,7 +135,7 @@ def handle_all_relationships(chat_id: str, cols_to_remove: list[str]):
     
     return final_msg, combined_charts
 
-@register_mock(MockCommands.FEATURE_IMPORTACES.value)
+@register_mock(DAMockCommands.FEATURE_IMPORTACES.value)
 def handle_feature_importances(chat_id: str, col: str, cols_to_remove: list[str]):
     # col1 и col2 прилетят прямо из регулярного выражения!
     data = get_feature_importances(chat_id, col, cols_to_remove)
@@ -143,7 +143,7 @@ def handle_feature_importances(chat_id: str, col: str, cols_to_remove: list[str]
     charts = [{"type": "feature_importances", "data": data}]
     return msg, charts
 
-@register_mock(MockCommands.FEATURE_TREE.value)
+@register_mock(DAMockCommands.FEATURE_TREE.value)
 def handle_feature_tree(chat_id: str, cols_to_remove: list[str]):
     data = get_feature_tree(chat_id, cols_to_remove)
     msg = mock_feature_tree_report(data)
