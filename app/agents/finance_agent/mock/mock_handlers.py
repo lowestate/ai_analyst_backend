@@ -5,12 +5,18 @@ from app.agents.core.utils import get_df_from_redis
 from app.agents.finance_agent.base_analysis import (
     calc_cash_flow,
     calc_pnl,
-    expense_structure
+    expense_structure,
+    calc_unit_economics,
+    calc_revenue_forecast,
+    calc_abc_analysis
 )
 from app.agents.finance_agent.mock.mock_reports import (
     mock_cash_flow_report,
     mock_pnl_report,
-    mock_expense_report
+    mock_expense_report,
+    mock_abc_report,
+    mock_forecast_report,
+    mock_unit_report
 )
 
 class FinMockCommands(str, Enum):
@@ -22,6 +28,10 @@ class FinMockCommands(str, Enum):
     
     # Группа 1: колонка категорий, Группа 2: колонка сумм
     EXPENSES = r"^структура расходов\s+(.+?)\s+(.+?)$"
+
+    ABC = r"^abc-анализ\s+(.+?)\s+(.+?)$"
+    UNIT = r"^юнит-экономика\s+(.+?)\s+(.+?)\s+(.+?)$"
+    FORECAST = r"^прогноз выручки\s+(.+?)\s+(.+?)$"
 
 FIN_MOCK_REGISTRY = {}
 
@@ -68,3 +78,21 @@ def handle_expense_structure(chat_id: str, cols_to_remove: list[str], category_c
     # ИСПРАВЛЕНИЕ: переименовываем tool_type в type для Pydantic
     charts = [{"type": data["tool_type"], "data": data["data"]}]
     return msg, charts
+
+@register_mock(FinMockCommands.ABC.value)
+def handle_abc(chat_id: str, cols_to_remove: list[str], category_col: str, amount_col: str):
+    df = _get_clean_df(chat_id, cols_to_remove)
+    data = calc_abc_analysis(df, category_col, amount_col)
+    return mock_abc_report(data["data"]), [{"type": data["tool_type"], "data": data["data"]}]
+
+@register_mock(FinMockCommands.UNIT.value)
+def handle_unit_econ(chat_id: str, cols_to_remove: list[str], source_col: str, amount_col: str, cac_col: str):
+    df = _get_clean_df(chat_id, cols_to_remove)
+    data = calc_unit_economics(df, source_col, amount_col, cac_col)
+    return mock_unit_report(data["data"]), [{"type": data["tool_type"], "data": data["data"]}]
+
+@register_mock(FinMockCommands.FORECAST.value)
+def handle_forecast(chat_id: str, cols_to_remove: list[str], date_col: str, amount_col: str):
+    df = _get_clean_df(chat_id, cols_to_remove)
+    data = calc_revenue_forecast(df, date_col, amount_col)
+    return mock_forecast_report(data["data"]), [{"type": data["tool_type"], "data": data["data"]}]
