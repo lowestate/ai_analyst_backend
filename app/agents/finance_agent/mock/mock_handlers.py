@@ -8,7 +8,8 @@ from app.agents.finance_agent.base_analysis import (
     expense_structure,
     calc_unit_economics,
     calc_revenue_forecast,
-    calc_abc_analysis
+    calc_abc_analysis,
+    calc_cohort_analysis
 )
 from app.agents.finance_agent.mock.mock_reports import (
     mock_cash_flow_report,
@@ -32,6 +33,7 @@ class FinMockCommands(str, Enum):
     ABC = r"^abc-анализ\s+(.+?)\s+(.+?)$"
     UNIT = r"^юнит-экономика\s+(.+?)\s+(.+?)\s+(.+?)$"
     FORECAST = r"^прогноз выручки\s+(.+?)\s+(.+?)$"
+    COHORT = r"^когортный анализ\s+(.+?)\s+(.+?)$"
 
 FIN_MOCK_REGISTRY = {}
 
@@ -96,3 +98,13 @@ def handle_forecast(chat_id: str, cols_to_remove: list[str], date_col: str, amou
     df = _get_clean_df(chat_id, cols_to_remove)
     data = calc_revenue_forecast(df, date_col, amount_col)
     return mock_forecast_report(data["data"]), [{"type": data["tool_type"], "data": data["data"]}]
+
+@register_mock(FinMockCommands.COHORT.value)
+def handle_cohort(chat_id: str, cols_to_remove: list[str], date_col: str, user_col: str):
+    df = _get_clean_df(chat_id, cols_to_remove)
+    data = calc_cohort_analysis(df, date_col, user_col)
+    
+    # Краткий текстовый ответ
+    msg = "**Когортный анализ (Retention Rate):** Тепловая карта удержания клиентов. Строки — это месяц первой покупки. Столбцы (0, 1, 2...) — это месяцы их 'жизни'. Чем темнее ячейки справа, тем лучше продукт возвращает покупателей."
+    
+    return msg, [{"type": data["tool_type"], "data": data["data"]}]

@@ -9,7 +9,8 @@ from app.agents.finance_agent.base_analysis import (
     expense_structure,
     calc_abc_analysis,
     calc_revenue_forecast,
-    calc_unit_economics
+    calc_unit_economics,
+    calc_cohort_analysis
 )
 
 @tool
@@ -73,4 +74,8 @@ def forecast_revenue_tool(date_col: str, amount_col: str, config: RunnableConfig
     df = get_df_from_redis(config.get("configurable", {}).get("chat_id"))
     return json.dumps(calc_revenue_forecast(df, date_col, amount_col), ensure_ascii=False)
 
-# P.S. Обязательно добавь их в массив self.tools в файле models.py!
+@tool
+def analyze_cohorts_tool(date_col: str, user_col: str, config: RunnableConfig = None) -> str:
+    """Проводит Когортный анализ (Retention). Показывает, как долго пользователи продолжают покупать."""
+    df = get_df_from_redis(config.get("configurable", {}).get("chat_id"))
+    return json.dumps(calc_cohort_analysis(df, date_col, user_col), ensure_ascii=False)

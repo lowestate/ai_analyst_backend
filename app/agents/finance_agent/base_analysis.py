@@ -154,3 +154,60 @@ def calc_revenue_forecast(df: pd.DataFrame, date_col: str, amount_col: str, fore
             "forecast_lower": forecast_y_lower  # Для нижнего края площади
         }
     }
+
+def calc_cohort_analysis(df: pd.DataFrame, date_col: str, user_col: str) -> dict:
+    """Когортный анализ удержания (Retention Rate)."""
+    df_clean = df.copy()
+    df_clean[date_col] = pd.to_datetime(df_clean[date_col], errors='coerce')
+    df_clean = df_clean.dropna(subset=[date_col, user_col])
+
+    # Приводим даты к началу месяца для создания когорт
+    df_clean['Order_Month'] = df_clean[date_col].dt.to_period('M').dt.to_timestamp()
+    
+    # Определяем когорту: месяц ПЕРВОЙ покупки для каждого пользователя
+    df_clean['Cohort'] = df_clean.groupby(user_col)['Order_Month'].transform('min')
+
+    # Считаем "возраст" клиента в месяцах на момент каждой покупки (0, 1, 2...)
+    df_clean['Period'] = (df_clean['Order_Month'].dt.year - df_clean['Cohort'].dt.year) * 12 + \
+                         (df_clean['Order_Month'].dt.month - df_clean['Cohort'].dt.month)
+
+    # Считаем уникальных юзеров по когортам и периодам
+    cohort_data = df_clean.groupby(['Cohort', 'Period'])[user_col].nunique().reset_index()
+    cohort_pivot = cohort_data.pivot(index='Cohort', columns='Period', values=user_col)
+    
+    # 100% — это количество людей в нулевой месяц (когда они пришли)
+    cohort_sizes = cohort_pivot.iloc[:, 0]
+    retention = cohort_pivot.divide(cohort_sizes, axis=0) * 100
+    retention = retention.round(1)
+
+    # Подготовка данных для Plotly Heatmap
+    cohort_labels = [d.strftime('%Y-%m') for d in retention.index]
+    periods = [str(p) for p in retention.columns]
+    
+    # --- ИСПРАВЛЕННЫЙ БЛОК ---
+    z_data = []
+    text_data = []
+    
+    for row in retention.values:
+        z_row = []
+        text_row = []
+        for val in row:
+            if pd.isna(val): # Надежно отлавливаем NaN
+                z_row.append(None)
+                text_row.append("") # Оставляем ячейку пустой
+            else:
+                z_row.append(val)
+                text_row.append(f"{val}%")
+        z_data.append(z_row)
+        text_data.append(text_row)
+    # -------------------------
+
+    return {
+        "tool_type": "cohort_analysis",
+        "data": {
+            "cohorts": cohort_labels,
+            "periods": periods,
+            "z": z_data,
+            "text": text_data
+        }
+    }

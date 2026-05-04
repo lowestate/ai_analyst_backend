@@ -2,7 +2,11 @@ from app.agents.client import llm
 from app.agents.finance_agent.tools import (
     calculate_cash_flow_tool,
     calculate_pnl_tool,
-    analyze_expense_structure_tool
+    analyze_expense_structure_tool,
+    analyze_abc_tool,
+    analyze_cohorts_tool,
+    analyze_unit_economics_tool,
+    forecast_revenue_tool
 )
 
 class FinanceAgentModel:
@@ -11,7 +15,11 @@ class FinanceAgentModel:
         self.tools = [
             calculate_cash_flow_tool,
             calculate_pnl_tool,
-            analyze_expense_structure_tool
+            analyze_expense_structure_tool,
+            analyze_abc_tool,
+            analyze_cohorts_tool,
+            analyze_unit_economics_tool,
+            forecast_revenue_tool
         ]
         self.tools_by_name = {t.name: t for t in self.tools}
         self.llm_with_tools = self.llm.bind_tools(self.tools)
