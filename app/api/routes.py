@@ -1,6 +1,10 @@
-from fastapi import APIRouter, UploadFile, File
+import json
+from fastapi import APIRouter, HTTPException, UploadFile, File
 from langchain_core.messages import HumanMessage, AIMessage
+from fastapi import APIRouter
+import asyncpg
 
+from app.users_db_interaction import DBCredentials, extract_schema_from_db
 from app.api.schemas import (
     ChatCreateResponse,
     ChatRequest,
@@ -21,16 +25,63 @@ app_graph = get_graph()
 
 @router.post("/upload", response_model=ChatCreateResponse)
 async def upload_dataset(file: UploadFile = File(...)):
+    
+    # ПРОВЕРЯЕМ: ЭТО ПОДКЛЮЧЕНИЕ К БД ИЛИ ОБЫЧНЫЙ ФАЙЛ?
+    if file.filename and file.filename.endswith(".json"):
+        # Читаем виртуальный JSON-файл с кредами
+        content = await file.read()
+        payload = json.loads(content)
+        
+        if payload.get("type") == "postgresql":
+            # Парсим креды в нашу Pydantic модель
+            creds = DBCredentials(**payload["credentials"])
+            
+            try:
+                # 1. Извлекаем реальную структуру базы данных!
+                db_schema = await extract_schema_from_db(creds)
+                
+                # Собираем список всех колонок для UI фильтрации (опционально)
+                all_columns = []
+                for table in db_schema["tables"]:
+                    all_columns.extend([c["name"] for c in table["columns"]])
+                
+                # 2. Формируем контекст для ИИ-агента
+                chat_id = "db_chat_" + creds.database # Генерируем ID чата
+                db_summary = f"База данных PostgreSQL: {creds.database}"
+                init_msg = f"Успешное подключение к базе данных `{creds.database}`. Найдено {len(db_schema['tables'])} таблиц. Я готов писать SQL-запросы для проведения финансового анализа."
+                
+                config = {"configurable": {"thread_id": chat_id, "chat_id": chat_id}}
+                initial_messages = [
+                    HumanMessage(content=f"Подключена база данных {creds.database}. Используй Text-to-SQL для анализа."),
+                    AIMessage(content=init_msg)
+                ]
+                
+                # Обновляем граф
+                app_graph.update_state(config, {
+                    "messages": initial_messages, 
+                    "chat_id": chat_id, 
+                    "charts_payload": []
+                })
+                
+                return ChatCreateResponse(
+                    chat_id=chat_id,
+                    preprocessing_report=init_msg,
+                    dataset_summary=db_summary,
+                    columns=list(set(all_columns)),
+                    db_schema=db_schema # ОТДАЕМ СХЕМУ НА ФРОНТ!
+                )
+                
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"Ошибка подключения к БД: {str(e)}")
+
+    # ---------------------------------------------------------
+    # СТАРЫЙ КОД ДЛЯ ОБРАБОТКИ ОБЫЧНЫХ CSV/XLSX ФАЙЛОВ
+    # ---------------------------------------------------------
     chat_id, filename, stats, columns = process_upload(file.file, file.filename)
     logger.info("process_upload DONE")
     init_data = await generate_initial_metadata(filename, columns, stats)
     
-    config = {
-        "configurable": {
-            "thread_id": chat_id,
-            "chat_id": chat_id
-        }
-    }
+    config = {"configurable": {"thread_id": chat_id, "chat_id": chat_id}}
     
     initial_messages = [
         HumanMessage(content=f"Файл {filename} загружен для проведения анализа."),
@@ -48,7 +99,8 @@ async def upload_dataset(file: UploadFile = File(...)):
         chat_id=chat_id, 
         preprocessing_report=init_data.initial_message,
         dataset_summary=init_data.chat_title,
-        columns=columns
+        columns=columns,
+        db_schema=None # Для файлов схемы нет
     )
 
 @router.post("/chat", response_model=ChatResponse)
@@ -147,3 +199,21 @@ async def get_available_mock_commands():
     da_commands = [cmd.value for cmd in DAMockCommands]
     fin_commands = [cmd.value for cmd in FinMockCommands]
     return {"commands": da_commands + fin_commands}
+
+@router.post("/test_connection")
+async def test_db_connection(creds: DBCredentials):
+    try:
+        # Пробуем установить соединение с таймаутом в 5 секунд
+        conn = await asyncpg.connect(
+            user=creds.user,
+            password=creds.password,
+            database=creds.database,
+            host=creds.host,
+            port=creds.port,
+            timeout=5.0
+        )
+        await conn.close()
+        return {"status": "success"}
+    except Exception as e:
+        # Возвращаем текст ошибки на фронтенд
+        return {"status": "error", "message": str(e)}

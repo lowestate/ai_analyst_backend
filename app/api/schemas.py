@@ -7,6 +7,7 @@ class ChatCreateResponse(BaseModel):
     preprocessing_report: str
     dataset_summary: str
     columns: List[str]
+    db_schema: Optional[Dict[str, Any]] = None
 
 
 class ChatRequest(BaseModel):
