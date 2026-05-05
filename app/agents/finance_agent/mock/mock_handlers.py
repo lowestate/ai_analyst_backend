@@ -31,7 +31,7 @@ class FinMockCommands(str, Enum):
     EXPENSES = r"^структура расходов\s+(.+?)\s+(.+?)$"
 
     ABC = r"^abc-анализ\s+(.+?)\s+(.+?)$"
-    UNIT = r"^юнит-экономика\s+(.+?)\s+(.+?)\s+(.+?)$"
+    UNIT = r"^юнит-экономика\s+(.+?)\s+(.+?)\s+(.+?)\s+(.+?)$"
     FORECAST = r"^прогноз выручки\s+(.+?)\s+(.+?)$"
     COHORT = r"^когортный анализ\s+(.+?)\s+(.+?)$"
 
@@ -88,9 +88,9 @@ def handle_abc(chat_id: str, cols_to_remove: list[str], category_col: str, amoun
     return mock_abc_report(data["data"]), [{"type": data["tool_type"], "data": data["data"]}]
 
 @register_mock(FinMockCommands.UNIT.value)
-def handle_unit_econ(chat_id: str, cols_to_remove: list[str], source_col: str, amount_col: str, cac_col: str):
+def handle_unit_econ(chat_id: str, cols_to_remove: list[str], source_col: str, amount_col: str, cac_col: str, user_col: str):
     df = _get_clean_df(chat_id, cols_to_remove)
-    data = calc_unit_economics(df, source_col, amount_col, cac_col)
+    data = calc_unit_economics(df, source_col, amount_col, cac_col, user_col)
     return mock_unit_report(data["data"]), [{"type": data["tool_type"], "data": data["data"]}]
 
 @register_mock(FinMockCommands.FORECAST.value)

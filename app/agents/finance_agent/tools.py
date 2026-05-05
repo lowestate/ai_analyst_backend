@@ -63,10 +63,10 @@ def analyze_abc_tool(category_col: str, amount_col: str, config: RunnableConfig 
     return json.dumps(calc_abc_analysis(df, category_col, amount_col), ensure_ascii=False)
 
 @tool
-def analyze_unit_economics_tool(source_col: str, amount_col: str, cac_col: str, config: RunnableConfig = None) -> str:
-    """Анализирует Юнит-экономику. Сравнивает ARPU (выручку) и CAC (затраты) в разрезе источников трафика."""
+def analyze_unit_economics_tool(source_col: str, amount_col: str, cac_col: str, user_col: str, config: RunnableConfig = None) -> str:
+    """Анализирует Юнит-экономику. Сравнивает LTV (выручку за всё время) и CAC (затраты) в разрезе источников трафика."""
     df = get_df_from_redis(config.get("configurable", {}).get("chat_id"))
-    return json.dumps(calc_unit_economics(df, source_col, amount_col, cac_col), ensure_ascii=False)
+    return json.dumps(calc_unit_economics(df, source_col, amount_col, cac_col, user_col), ensure_ascii=False)
 
 @tool
 def forecast_revenue_tool(date_col: str, amount_col: str, config: RunnableConfig = None) -> str:

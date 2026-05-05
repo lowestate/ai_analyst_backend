@@ -1,7 +1,6 @@
-import os
-from langchain_google_genai import ChatGoogleGenerativeAI
 from pydantic import BaseModel, Field
 
+from app.agents.client import llm
 from app.agents.core.state import AgentState
 from app.agents.supervisor.prompt import SUPERVISOR_PROMPT
 
@@ -12,14 +11,10 @@ class RouteOutput(BaseModel):
 
 async def supervisor_node(state: AgentState):
     """Узел супервизора для AI-режима. Определяет следующего агента."""
-    llm = ChatGoogleGenerativeAI(
-        model=os.getenv("LLM_MODEL", "gemini-2.5-flash"),
-        temperature=0, # Нулевая температура для предсказуемой маршрутизации
-        api_key=os.getenv("GOOGLE_API_KEY")
-    )
+    llm_instance = llm(temp=0)
     
     # Заставляем LLM вернуть строго JSON по нашей Pydantic схеме
-    structured_llm = llm.with_structured_output(RouteOutput)
+    structured_llm = llm_instance.with_structured_output(RouteOutput)
     
     # Берем последнее сообщение юзера
     last_message = state["messages"][-1].content

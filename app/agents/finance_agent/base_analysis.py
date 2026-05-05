@@ -77,16 +77,41 @@ def calc_abc_analysis(df: pd.DataFrame, category_col: str, amount_col: str) -> d
         }
     }
 
-def calc_unit_economics(df: pd.DataFrame, source_col: str, amount_col: str, cac_col: str) -> dict:
-    """Сравнение среднего чека (ARPU) и стоимости привлечения (CAC) по каналам."""
+def calc_unit_economics(df: pd.DataFrame, source_col: str, amount_col: str, cac_col: str, user_col: str) -> dict:
+    """Сравнение LTV (выручки за всё время) и CAC (затрат) по каналам с обработкой органики."""
     df_clean = df[pd.to_numeric(df[amount_col], errors='coerce') > 0].copy()
     df_clean[cac_col] = pd.to_numeric(df_clean[cac_col], errors='coerce').fillna(0)
     
-    grouped = df_clean.groupby(source_col).agg({amount_col: 'mean', cac_col: 'mean'}).reset_index()
+    # 1. Считаем LTV каждого отдельного клиента за всё время
+    # Берем сумму всех его покупок, а источник трафика и CAC считаем по его первой транзакции
+    user_ltv = df_clean.groupby(user_col).agg({
+        amount_col: 'sum',   # LTV: сумма всех покупок клиента
+        cac_col: 'first',    # CAC: стоимость его привлечения
+        source_col: 'first'  # Источник, из которого он пришел
+    }).reset_index()
+    
+    # 2. Усредняем LTV и CAC в разрезе каналов трафика
+    grouped = user_ltv.groupby(source_col).agg({amount_col: 'mean', cac_col: 'mean'}).reset_index()
     grouped.rename(columns={amount_col: 'arpu', cac_col: 'cac'}, inplace=True)
     
-    # Считаем ROMI (Return on Marketing Investment)
-    grouped['romi'] = np.where(grouped['cac'] > 0, ((grouped['arpu'] - grouped['cac']) / grouped['cac'] * 100), 0)
+    valid_romi = [((r['arpu'] - r['cac']) / r['cac'] * 100) for _, r in grouped.iterrows() if r['cac'] > 0]
+    max_romi = max(valid_romi) if valid_romi else 0
+    organic_y = max(max_romi * 1.1, 100.0) 
+    
+    romi_values = []
+    romi_text = []
+    
+    for _, row in grouped.iterrows():
+        if row['cac'] > 0:
+            val = round((row['arpu'] - row['cac']) / row['cac'] * 100, 1)
+            romi_values.append(val)
+            romi_text.append(f"{val}%")
+        elif row['cac'] == 0 and row['arpu'] > 0:
+            romi_values.append(round(organic_y, 1))
+            romi_text.append("∞") 
+        else:
+            romi_values.append(0)
+            romi_text.append("0%")
     
     return {
         "tool_type": "unit_economics",
@@ -94,7 +119,8 @@ def calc_unit_economics(df: pd.DataFrame, source_col: str, amount_col: str, cac_
             "sources": grouped[source_col].tolist(),
             "arpu": grouped['arpu'].round(2).tolist(),
             "cac": grouped['cac'].round(2).tolist(),
-            "romi": grouped['romi'].round(1).tolist()
+            "romi": romi_values,
+            "romi_text": romi_text
         }
     }
 
