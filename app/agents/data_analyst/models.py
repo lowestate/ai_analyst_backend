@@ -1,17 +1,29 @@
 from app.agents.client import llm
 from app.agents.data_analyst.tools import (
-    analyze_columns, correlation_matrix, detect_outliers,
-    analyze_trends, analyze_dependency, pairplot_tool,
-    feature_importances_tool, feature_tree_tool
+    analyze_columns,
+    correlation_matrix,
+    detect_outliers,
+    analyze_trends,
+    analyze_dependency,
+    pairplot_tool,
+    feature_importances_tool,
+    feature_tree_tool,
+    request_db_query
 )
 
 class DataAnalystModel:
     def __init__(self):
         self.llm = llm()
         self.tools = [
-            analyze_columns, correlation_matrix, detect_outliers,
-            analyze_trends, analyze_dependency, pairplot_tool,
-            feature_importances_tool, feature_tree_tool
+            analyze_columns,
+            correlation_matrix,
+            detect_outliers,
+            analyze_trends,
+            analyze_dependency,
+            pairplot_tool,
+            feature_importances_tool,
+            feature_tree_tool,
+            request_db_query
         ]
         self.tools_by_name = {t.name: t for t in self.tools}
         # Биндим тулы к модели

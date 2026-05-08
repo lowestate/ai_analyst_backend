@@ -1,4 +1,5 @@
 import json
+import uuid
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from langchain_core.messages import HumanMessage, AIMessage
 from fastapi import APIRouter
@@ -25,58 +26,47 @@ app_graph = get_graph()
 
 @router.post("/upload", response_model=ChatCreateResponse)
 async def upload_dataset(file: UploadFile = File(...)):
-    
-    # ПРОВЕРЯЕМ: ЭТО ПОДКЛЮЧЕНИЕ К БД ИЛИ ОБЫЧНЫЙ ФАЙЛ?
     if file.filename and file.filename.endswith(".json"):
-        # Читаем виртуальный JSON-файл с кредами
         content = await file.read()
         payload = json.loads(content)
         
         if payload.get("type") == "postgresql":
-            # Парсим креды в нашу Pydantic модель
             creds = DBCredentials(**payload["credentials"])
-            
             try:
-                # 1. Извлекаем реальную структуру базы данных!
                 db_schema = await extract_schema_from_db(creds)
-                
-                # Собираем список всех колонок для UI фильтрации (опционально)
                 all_columns = []
                 for table in db_schema["tables"]:
                     all_columns.extend([c["name"] for c in table["columns"]])
                 
-                # 2. Формируем контекст для ИИ-агента
-                chat_id = "db_chat_" + creds.database # Генерируем ID чата
+                unique_suffix = uuid.uuid4().hex[:8]
+                chat_id = f"db_chat_{creds.database}_{unique_suffix}"
+                
                 db_summary = f"База данных PostgreSQL: {creds.database}"
                 init_msg = f"Успешное подключение к базе данных `{creds.database}`. Найдено {len(db_schema['tables'])} таблиц. Я готов писать SQL-запросы для проведения финансового анализа."
                 
                 config = {"configurable": {"thread_id": chat_id, "chat_id": chat_id}}
                 initial_messages = [
-                    HumanMessage(content=f"Подключена база данных {creds.database}. Используй Text-to-SQL для анализа."),
+                    HumanMessage(content=f"Подключена база данных {creds.database}. Используй Text-to-SQL для получения данных."),
                     AIMessage(content=init_msg)
                 ]
                 
-                # Обновляем граф
                 app_graph.update_state(config, {
                     "messages": initial_messages, 
                     "chat_id": chat_id, 
-                    "charts_payload": []
+                    "charts_payload": [],
+                    "data_source": "db",
+                    "db_schema": db_schema,
+                    "db_credentials": creds.model_dump(),
+                    "waiting_for_sql_approval": False
                 })
                 
                 return ChatCreateResponse(
-                    chat_id=chat_id,
-                    preprocessing_report=init_msg,
-                    dataset_summary=db_summary,
-                    columns=list(set(all_columns)),
-                    db_schema=db_schema # ОТДАЕМ СХЕМУ НА ФРОНТ!
+                    chat_id=chat_id, preprocessing_report=init_msg,
+                    dataset_summary=db_summary, columns=list(set(all_columns)), db_schema=db_schema
                 )
-                
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Ошибка подключения к БД: {str(e)}")
 
-    # ---------------------------------------------------------
-    # СТАРЫЙ КОД ДЛЯ ОБРАБОТКИ ОБЫЧНЫХ CSV/XLSX ФАЙЛОВ
-    # ---------------------------------------------------------
     chat_id, filename, stats, columns = process_upload(file.file, file.filename)
     logger.info("process_upload DONE")
     init_data = await generate_initial_metadata(filename, columns, stats)
@@ -100,7 +90,7 @@ async def upload_dataset(file: UploadFile = File(...)):
         preprocessing_report=init_data.initial_message,
         dataset_summary=init_data.chat_title,
         columns=columns,
-        db_schema=None # Для файлов схемы нет
+        db_schema=None
     )
 
 @router.post("/chat", response_model=ChatResponse)
@@ -112,84 +102,129 @@ async def chat_interaction(req: ChatRequest):
             "chat_id": req.chat_id
         }
     }
-    app_graph.update_state(config, {"charts_payload": []})
     
-    user_message = req.message
+    # 1. Проверяем, ждет ли граф подтверждения SQL от пользователя
+    current_state = app_graph.get_state(config).values
+    is_waiting = current_state.get("waiting_for_sql_approval", False)
     
-    # --- ОБРАБОТКА МОК-РЕЖИМА ---
-    if not req.use_ai:
-        logger.info("MOCK MODE: Перехват запроса чата")
+    # ==========================================
+    # ВЕТКА A: Ответ на генерацию SQL (HITL)
+    # ==========================================
+    if is_waiting and req.sql_action:
+        logger.info(f"Получен ответ по SQL: {req.sql_action}. Комментарий: {req.sql_feedback}")
         
-        # 1. Роутер моков определяет агента и очищает тег [A]/[Ф]
-        target_agent, msg_clean = route_mock_request(user_message)
-        msg_clean = msg_clean.strip('.?!') 
+        updates = {
+            "sql_action": req.sql_action,
+            "sql_feedback": req.sql_feedback if req.sql_action == "reject" else ""
+        }
         
-        handler_func = None
-        extracted_args = ()
-        
-        # 2. Выбираем реестр команд в зависимости от тега
-        if target_agent == "data_analyst":
-            active_registry = DA_MOCK_REGISTRY
-        elif target_agent == "finance_agent":
-            active_registry = FIN_MOCK_REGISTRY
-        else:
-            active_registry = DA_MOCK_REGISTRY
+        if req.sql_action == "approve" and req.sql_query:
+            updates["sql_query"] = req.sql_query
             
-        # 3. Ищем команду
-        for pattern, func in active_registry.items():
-            match = pattern.match(msg_clean)
-            if match:
-                handler_func = func
-                extracted_args = match.groups() 
-                break
-        
-        if handler_func:
-            try:
-                final_message, charts = handler_func(req.chat_id, req.cols_to_remove, *extracted_args)
-                charts = serialize(charts)
-            except Exception as e:
-                logger.error(f"Ошибка мок-вычисления: {str(e)}")
-                final_message = f"Ошибка вычисления: {str(e)}"
-                charts = []
-        else:
-            final_message = "Я не знаю такой команды в рамках мок-режима."
-            charts = []
-            
-        # Сохраняем в историю
-        app_graph.update_state(config, {
-            "messages": [
-                HumanMessage(content=user_message),
-                AIMessage(content=final_message)
-            ],
-            "charts_payload": charts
-        })
-        
-        return ChatResponse(reply=final_message, charts=charts)
+        # ИСПРАВЛЕНИЕ: Передаем updates напрямую в ainvoke. 
+        # Это "пнет" граф, заставит его проснуться, обновить стейт 
+        # и пойти в entry_router, который перенаправит поток в text_to_sql_execute.
+        final_state = await app_graph.ainvoke(updates, config=config)
 
-    # --- ОБРАБОТКА AI-РЕЖИМА ---
-    # Граф сам вызовет Супервизора, а затем нужного Агента
-    inputs = {"messages": [HumanMessage(content=user_message)]}
-    final_state = await app_graph.ainvoke(inputs, config=config)
+    # ==========================================
+    # ВЕТКА B: Обычный новый запрос в чат
+    # ==========================================
+    else:
+        app_graph.update_state(config, {"charts_payload": []})
+        user_message = req.message
+        
+        # --- МОКОВЫЙ РЕЖИМ ---
+        if not req.use_ai:
+            logger.info("MOCK MODE: Перехват запроса чата")
+            
+            target_agent, msg_clean = route_mock_request(user_message)
+            msg_clean = msg_clean.strip('.?!') 
+            
+            handler_func = None
+            extracted_args = ()
+            
+            if target_agent == "data_analyst":
+                active_registry = DA_MOCK_REGISTRY
+            elif target_agent == "finance_agent":
+                active_registry = FIN_MOCK_REGISTRY
+            else:
+                active_registry = DA_MOCK_REGISTRY
+                
+            for pattern, func in active_registry.items():
+                match = pattern.match(msg_clean)
+                if match:
+                    handler_func = func
+                    extracted_args = match.groups() 
+                    break
+            
+            if handler_func:
+                try:
+                    final_message, charts = handler_func(req.chat_id, req.cols_to_remove, *extracted_args)
+                    charts = serialize(charts)
+                except Exception as e:
+                    logger.error(f"Ошибка мок-вычисления: {str(e)}")
+                    final_message = f"Ошибка вычисления: {str(e)}"
+                    charts = []
+            else:
+                final_message = "Я не знаю такой команды в рамках мок-режима."
+                charts = []
+                
+            app_graph.update_state(config, {
+                "messages": [
+                    HumanMessage(content=user_message),
+                    AIMessage(content=final_message)
+                ],
+                "charts_payload": charts
+            })
+            
+            # В мок-режиме SQL не используется
+            return ChatResponse(reply=final_message, charts=charts, is_waiting_for_sql=False)
+
+        # --- AI РЕЖИМ ---
+        inputs = {"messages": [HumanMessage(content=user_message)]}
+        final_state = await app_graph.ainvoke(inputs, config=config)
+
+    # ==========================================
+    # 2. Обработка финального состояния (после графа)
+    # ==========================================
+    is_waiting_now = final_state.get("waiting_for_sql_approval", False)
     
-    raw_content = final_state["messages"][-1].content
-    
-    if isinstance(raw_content, list):
-        final_message = "".join(
-            block["text"] for block in raw_content 
-            if isinstance(block, dict) and "text" in block
+    if is_waiting_now:
+        # Граф остановился, ждет аппрува от юзера
+        sql_query = final_state.get("sql_query", "")
+        return ChatResponse(
+            reply="Чтобы получить данные для анализа, мне нужно выполнить SQL запрос:",
+            charts=[],
+            sql_query=sql_query,
+            is_waiting_for_sql=True
         )
     else:
-        final_message = str(raw_content)
+        # Граф отработал до конца (либо ответил на вопрос, либо выполнил SQL и вернул ответ)
+        raw_content = final_state["messages"][-1].content
         
-    logger.info(f"\ninputs={inputs}\n\nfinal_message={final_message}\n")
-    
-    if not final_message.strip():
-        logger.warning("LLM вернула пустой текст, применяем fallback-сообщение")
-        final_message = "Графики успешно построены. Если вам нужна дополнительная текстовая интерпретация, дайте знать."
+        if isinstance(raw_content, list):
+            final_message = "".join(
+                block["text"] for block in raw_content 
+                if isinstance(block, dict) and "text" in block
+            )
+        else:
+            final_message = str(raw_content)
+            
+        logger.info(f"\nfinal_message={final_message}\n")
+        
+        if not final_message.strip():
+            logger.warning("LLM вернула пустой текст, применяем fallback-сообщение")
+            final_message = "Графики успешно построены. Если вам нужна дополнительная текстовая интерпретация, дайте знать."
 
-    charts = final_state.get("charts_payload", [])
-    logger.info(f"\ncharts={charts}")
-    return ChatResponse(reply=final_message, charts=charts)
+        charts = final_state.get("charts_payload", [])
+        logger.info(f"\ncharts={charts}")
+        
+        return ChatResponse(
+            reply=final_message, 
+            charts=charts,
+            sql_query=None,
+            is_waiting_for_sql=False
+        )
 
 @router.get("/available_mock_commands")
 async def get_available_mock_commands():
@@ -203,7 +238,6 @@ async def get_available_mock_commands():
 @router.post("/test_connection")
 async def test_db_connection(creds: DBCredentials):
     try:
-        # Пробуем установить соединение с таймаутом в 5 секунд
         conn = await asyncpg.connect(
             user=creds.user,
             password=creds.password,

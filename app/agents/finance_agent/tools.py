@@ -14,6 +14,13 @@ from app.agents.finance_agent.base_analysis import (
 )
 
 @tool
+def request_db_query(query_description: str) -> str:
+    """ОБЯЗАТЕЛЬНО используй этот инструмент, если источник данных - база данных (db).
+    В 'query_description' опиши БИЗНЕС-СУТЬ того, что нужно найти (например: 'Посчитай LTV, CAC и выручку по каналам привлечения').
+    ВНИМАНИЕ: НЕ проси агента узнать структуру БД или названия таблиц! У SQL-агента уже есть полная схема БД. Просто четко поставь ему аналитическую задачу."""
+    return "Ожидание выполнения SQL-запроса в БД..."
+
+@tool
 def calculate_cash_flow_tool(date_col: str, amount_col: str, freq: str = 'M', config: RunnableConfig = None) -> str:
     """
     Рассчитывает Cash Flow (денежный поток) по времени.

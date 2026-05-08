@@ -15,13 +15,18 @@ class ChatRequest(BaseModel):
     message: str
     use_ai: bool
     cols_to_remove: list[str] = []
+    sql_action: Optional[str] = None
+    sql_feedback: Optional[str] = None
+    sql_query: Optional[str] = None
 
 
 class ChartData(BaseModel):
-    type: str # 'correlation', 'distribution', 'category_count'
+    type: str
     data: Dict[str, Any]
 
 
 class ChatResponse(BaseModel):
     reply: str
     charts: Optional[List[ChartData]] = []
+    sql_query: Optional[str] = None
+    is_waiting_for_sql: bool = False

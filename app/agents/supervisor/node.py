@@ -13,10 +13,8 @@ async def supervisor_node(state: AgentState):
     """Узел супервизора для AI-режима. Определяет следующего агента."""
     llm_instance = llm(temp=0)
     
-    # Заставляем LLM вернуть строго JSON по нашей Pydantic схеме
     structured_llm = llm_instance.with_structured_output(RouteOutput)
     
-    # Берем последнее сообщение юзера
     last_message = state["messages"][-1].content
     
     system_message = {"role": "system", "content": SUPERVISOR_PROMPT}
@@ -27,10 +25,8 @@ async def supervisor_node(state: AgentState):
     if isinstance(response, dict):
         next_agent = response.get("next_agent", "data_analyst")
     else:
-        # Pydantic v2 возвращает объект
         next_agent = getattr(response, "next_agent", "data_analyst") # type: ignore
         
-    # Страховка: если LLM сошла с ума и выдала бред, кидаем в дефолтного агента
     if next_agent not in ["data_analyst", "finance_agent"]:
         next_agent = "data_analyst"
         

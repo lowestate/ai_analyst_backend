@@ -6,7 +6,8 @@ from app.agents.finance_agent.tools import (
     analyze_abc_tool,
     analyze_cohorts_tool,
     analyze_unit_economics_tool,
-    forecast_revenue_tool
+    forecast_revenue_tool,
+    request_db_query
 )
 
 class FinanceAgentModel:
@@ -19,7 +20,8 @@ class FinanceAgentModel:
             analyze_abc_tool,
             analyze_cohorts_tool,
             analyze_unit_economics_tool,
-            forecast_revenue_tool
+            forecast_revenue_tool,
+            request_db_query
         ]
         self.tools_by_name = {t.name: t for t in self.tools}
         self.llm_with_tools = self.llm.bind_tools(self.tools)

@@ -96,3 +96,24 @@ async def extract_schema_from_db(creds: DBCredentials) -> Dict[str, Any]:
     finally:
         # Всегда закрываем соединение!
         await conn.close()
+
+async def execute_sql_query(creds_dict: dict, query: str) -> list[dict]:
+    """Выполняет подтвержденный SQL запрос к БД. Разрешены только SELECT."""
+    if not query.strip().upper().startswith("SELECT"):
+        raise ValueError("Разрешены только SELECT запросы в целях безопасности.")
+        
+    conn = await asyncpg.connect(
+        user=creds_dict["user"],
+        password=creds_dict["password"],
+        database=creds_dict["database"],
+        host=creds_dict["host"],
+        port=creds_dict["port"]
+    )
+    
+    try:
+        # Выполняем запрос
+        records = await conn.fetch(query)
+        # Преобразуем записи в список словарей
+        return [dict(r) for r in records]
+    finally:
+        await conn.close()
