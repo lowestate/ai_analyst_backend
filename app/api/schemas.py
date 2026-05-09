@@ -30,3 +30,7 @@ class ChatResponse(BaseModel):
     charts: Optional[List[ChartData]] = []
     sql_query: Optional[str] = None
     is_waiting_for_sql: bool = False
+
+
+class RefreshSchemaRequest(BaseModel):
+    chat_id: str

@@ -9,7 +9,8 @@ from app.users_db_interaction import DBCredentials, extract_schema_from_db
 from app.api.schemas import (
     ChatCreateResponse,
     ChatRequest,
-    ChatResponse
+    ChatResponse,
+    RefreshSchemaRequest
 )
 from app.config import logger, redis_client
 from app.agents.supervisor.mock_router import route_mock_request
@@ -251,3 +252,23 @@ async def test_db_connection(creds: DBCredentials):
     except Exception as e:
         # Возвращаем текст ошибки на фронтенд
         return {"status": "error", "message": str(e)}
+    
+@router.post("/refresh_schema")
+async def refresh_schema_endpoint(req: RefreshSchemaRequest):
+    # Достаем креды из памяти графа (мы их туда клали при изначальном upload)
+    config = {"configurable": {"thread_id": req.chat_id, "chat_id": req.chat_id}}
+    state = app_graph.get_state(config).values
+    creds_dict = state.get("db_credentials")
+    
+    if not creds_dict:
+        raise HTTPException(status_code=400, detail="Креды для БД не найдены в текущей сессии")
+        
+    creds = DBCredentials(**creds_dict)
+    
+    # Заново извлекаем схему без дублирования SQL-кода
+    new_db_schema = await extract_schema_from_db(creds)
+    
+    # Обновляем схему в стейте, чтобы сабагенты тоже видели новые колонки
+    app_graph.update_state(config, {"db_schema": new_db_schema})
+    
+    return new_db_schema
