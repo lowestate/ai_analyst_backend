@@ -1,21 +1,24 @@
 import json
 import uuid
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from typing import Dict, Any
+from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Request
 from langchain_core.messages import HumanMessage, AIMessage
 from fastapi import APIRouter
 import asyncpg
 
+from app.database import pool
 from app.users_db_interaction import DBCredentials, extract_schema_from_db
 from app.api.schemas import (
     ChatCreateResponse,
     ChatRequest,
     ChatResponse,
-    RefreshSchemaRequest
+    RefreshSchemaRequest,
+    ChatSessionDTO,
+    LoadChatResponse
 )
 from app.config import logger, redis_client
 from app.agents.supervisor.mock_router import route_mock_request
 assert redis_client is not None, "Redis client must be initialized"
-from app.agents.graph import get_graph
 from app.agents.core.initial_invoke import generate_initial_metadata
 from app.agents.core.utils import process_upload, serialize
 from app.agents.data_analyst.mock.mock_handlers import DA_MOCK_REGISTRY, DAMockCommands
@@ -23,10 +26,25 @@ from app.agents.finance_agent.mock.mock_handlers import FIN_MOCK_REGISTRY, FinMo
 
 
 router = APIRouter()
-app_graph = get_graph()
+
+def get_app_graph(request: Request) -> Any:
+    """Берет граф из глобального состояния приложения"""
+    # Достаем граф из app.state
+    graph = getattr(request.app.state, "graph", None)
+    
+    if graph is None:
+        raise HTTPException(status_code=503, detail="Граф еще не инициализирован сервером")
+        
+    return graph
 
 @router.post("/upload", response_model=ChatCreateResponse)
-async def upload_dataset(file: UploadFile = File(...)):
+async def upload_dataset(
+    file: UploadFile = File(...),
+    graph: Any = Depends(get_app_graph)
+):
+    # ==========================================
+    # ВЕТКА 1: Подключение к БД PostgreSQL
+    # ==========================================
     if file.filename and file.filename.endswith(".json"):
         content = await file.read()
         payload = json.loads(content)
@@ -50,8 +68,8 @@ async def upload_dataset(file: UploadFile = File(...)):
                     HumanMessage(content=f"Подключена база данных {creds.database}. Используй Text-to-SQL для получения данных."),
                     AIMessage(content=init_msg)
                 ]
-                
-                app_graph.update_state(config, {
+                                
+                await graph.aupdate_state(config, {
                     "messages": initial_messages, 
                     "chat_id": chat_id, 
                     "charts_payload": [],
@@ -59,8 +77,15 @@ async def upload_dataset(file: UploadFile = File(...)):
                     "db_schema": db_schema,
                     "db_credentials": creds.model_dump(),
                     "waiting_for_sql_approval": False
-                })
+                }, as_node="__start__")
                 
+                # Сохраняем сессию (используем db_summary вместо init_data и file.filename)
+                async with pool.connection() as conn:
+                    await conn.execute(
+                        "INSERT INTO chat_sessions (chat_id, dataset_name, filename) VALUES (%s, %s, %s)",
+                        (chat_id, db_summary, file.filename)
+                    )
+
                 return ChatCreateResponse(
                     chat_id=chat_id, preprocessing_report=init_msg,
                     dataset_summary=db_summary, columns=list(set(all_columns)), db_schema=db_schema
@@ -68,6 +93,9 @@ async def upload_dataset(file: UploadFile = File(...)):
             except Exception as e:
                 raise HTTPException(status_code=400, detail=f"Ошибка подключения к БД: {str(e)}")
 
+    # ==========================================
+    # ВЕТКА 2: Загрузка обычного файла (CSV / Excel)
+    # ==========================================
     chat_id, filename, stats, columns = process_upload(file.file, file.filename)
     logger.info("process_upload DONE")
     init_data = await generate_initial_metadata(filename, columns, stats)
@@ -79,13 +107,20 @@ async def upload_dataset(file: UploadFile = File(...)):
         AIMessage(content=init_data.initial_message)
     ]
     logger.info(f"initial_messages={initial_messages}")
-    
-    app_graph.update_state(config, {
+        
+    await graph.aupdate_state(config, {
         "messages": initial_messages, 
         "chat_id": chat_id, 
         "charts_payload": []
-    })
-    
+    }, as_node="__start__")
+
+    # Сохраняем сессию и для обычных файлов
+    async with pool.connection() as conn:
+        await conn.execute(
+            "INSERT INTO chat_sessions (chat_id, dataset_name, filename) VALUES (%s, %s, %s)",
+            (chat_id, init_data.chat_title, filename)
+        )
+
     return ChatCreateResponse(
         chat_id=chat_id, 
         preprocessing_report=init_data.initial_message,
@@ -95,7 +130,10 @@ async def upload_dataset(file: UploadFile = File(...)):
     )
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat_interaction(req: ChatRequest):
+async def chat_interaction(
+    req: ChatRequest,
+    graph: Any = Depends(get_app_graph)
+):
     logger.info(f"new request: {req}")
     config = {
         "configurable": {
@@ -105,7 +143,8 @@ async def chat_interaction(req: ChatRequest):
     }
     
     # 1. Проверяем, ждет ли граф подтверждения SQL от пользователя
-    current_state = app_graph.get_state(config).values
+    state_snap = await graph.aget_state(config)
+    current_state = state_snap.values
     is_waiting = current_state.get("waiting_for_sql_approval", False)
     
     # ==========================================
@@ -125,13 +164,13 @@ async def chat_interaction(req: ChatRequest):
         # ИСПРАВЛЕНИЕ: Передаем updates напрямую в ainvoke. 
         # Это "пнет" граф, заставит его проснуться, обновить стейт 
         # и пойти в entry_router, который перенаправит поток в text_to_sql_execute.
-        final_state = await app_graph.ainvoke(updates, config=config)
+        final_state = await graph.ainvoke(updates, config=config)
 
     # ==========================================
     # ВЕТКА B: Обычный новый запрос в чат
     # ==========================================
     else:
-        app_graph.update_state(config, {"charts_payload": []})
+        await graph.aupdate_state(config, {"charts_payload": []}, as_node="__start__")
         user_message = req.message
         
         # --- МОКОВЫЙ РЕЖИМ ---
@@ -170,20 +209,24 @@ async def chat_interaction(req: ChatRequest):
                 final_message = "Я не знаю такой команды в рамках мок-режима."
                 charts = []
                 
-            app_graph.update_state(config, {
-                "messages": [
-                    HumanMessage(content=user_message),
-                    AIMessage(content=final_message)
-                ],
-                "charts_payload": charts
-            })
-            
+            await graph.aupdate_state(
+                config, 
+                {
+                    "messages": [
+                        HumanMessage(content=msg_clean),
+                        AIMessage(content=final_message)
+                    ],
+                    "charts_payload": charts
+                }, 
+                as_node="__start__"
+            )
+
             # В мок-режиме SQL не используется
             return ChatResponse(reply=final_message, charts=charts, is_waiting_for_sql=False)
 
         # --- AI РЕЖИМ ---
         inputs = {"messages": [HumanMessage(content=user_message)]}
-        final_state = await app_graph.ainvoke(inputs, config=config)
+        final_state = await graph.ainvoke(inputs, config=config)
 
     # ==========================================
     # 2. Обработка финального состояния (после графа)
@@ -254,10 +297,13 @@ async def test_db_connection(creds: DBCredentials):
         return {"status": "error", "message": str(e)}
     
 @router.post("/refresh_schema")
-async def refresh_schema_endpoint(req: RefreshSchemaRequest):
+async def refresh_schema_endpoint(
+    req: RefreshSchemaRequest,
+    graph: Any = Depends(get_app_graph)
+):
     # Достаем креды из памяти графа (мы их туда клали при изначальном upload)
     config = {"configurable": {"thread_id": req.chat_id, "chat_id": req.chat_id}}
-    state = app_graph.get_state(config).values
+    state = await graph.aget_state(config).values
     creds_dict = state.get("db_credentials")
     
     if not creds_dict:
@@ -269,6 +315,65 @@ async def refresh_schema_endpoint(req: RefreshSchemaRequest):
     new_db_schema = await extract_schema_from_db(creds)
     
     # Обновляем схему в стейте, чтобы сабагенты тоже видели новые колонки
-    app_graph.update_state(config, {"db_schema": new_db_schema})
+    await graph.aupdate_state(config, {"db_schema": new_db_schema}, as_node="__start__")
     
     return new_db_schema
+
+@router.get("/sessions", response_model=list[ChatSessionDTO])
+async def get_sessions():
+    async with pool.connection() as conn:
+        records = await conn.execute("SELECT chat_id, dataset_name, filename FROM chat_sessions ORDER BY created_at ASC")
+        rows = await records.fetchall()
+        return [{"id": r[0], "datasetName": r[1], "filename": r[2]} for r in rows]
+    
+@router.get("/chat/{chat_id}", response_model=LoadChatResponse)
+async def load_chat(
+    chat_id: str,
+    graph: Any = Depends(get_app_graph)
+):
+    config = {"configurable": {"thread_id": chat_id, "chat_id": chat_id}}
+    
+    state_snap = await graph.aget_state(config)
+    if not state_snap or not state_snap.values:
+        raise HTTPException(status_code=404, detail="История чата не найдена")
+        
+    state: Dict[str, Any] = dict(state_snap.values)
+    
+    frontend_msgs = []
+    for msg in state.get("messages", []):
+        if isinstance(msg, HumanMessage):
+            # Скрываем системные кнопки аппрувов из UI
+            if isinstance(msg.content, str) and msg.content.startswith("SQL_ACTION"): 
+                continue
+            frontend_msgs.append({"id": getattr(msg, "id", str(uuid.uuid4())), "sender": "user", "text": str(msg.content)})
+            
+        elif isinstance(msg, AIMessage):
+            content = msg.content
+            if isinstance(content, list):
+                content = "".join(b["text"] for b in content if isinstance(b, dict) and "text" in b)
+            
+            # Если это запрос на SQL, помечаем его флагом для UI
+            is_sql = "```sql" in content and "Я подготовил SQL запрос" in content
+            
+            frontend_msgs.append({
+                "id": getattr(msg, "id", str(uuid.uuid4())), 
+                "sender": "agent", 
+                "text": content,
+                "isSqlWaiting": is_sql
+            })
+            
+    return LoadChatResponse(
+        db_schema=state.get("db_schema"),
+        messages=frontend_msgs,
+        is_waiting_for_sql=state.get("waiting_for_sql_approval", False),
+        sql_query=state.get("sql_query"),
+        charts_payload=state.get("charts_payload", [])
+    )
+
+@router.delete("/chat/{chat_id}")
+async def delete_chat(chat_id: str):
+    from app.database import pool
+    async with pool.connection() as conn:
+        # Удаляем запись о чате из сайдбара
+        await conn.execute("DELETE FROM chat_sessions WHERE chat_id = %s", (chat_id,))
+    return {"status": "success", "message": "Чат удален"}

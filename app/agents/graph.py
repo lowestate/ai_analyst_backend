@@ -1,5 +1,4 @@
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import AIMessage
 
 from app.agents.core.state import AgentState
@@ -7,8 +6,6 @@ from app.agents.supervisor.node import supervisor_node
 from app.agents.data_analyst.nodes import data_analyst_model_node, data_analyst_tool_node
 from app.agents.finance_agent.nodes import finance_agent_model_node, finance_agent_tool_node
 from app.agents.text_to_sql_agent.nodes import text_to_sql_generate_node, text_to_sql_execute_node
-
-memory = MemorySaver()
 
 def should_continue_agent(state: AgentState):
     """Проверяет вызовы тулов. Маршрутизирует на Text-to-SQL, если вызван нужный тул."""
@@ -35,7 +32,7 @@ def return_to_origin(state: AgentState):
     origin = state.get("origin_agent", "data_analyst_model")
     return origin
 
-def get_graph():
+def init_graph(checkpointer):
     workflow = StateGraph(AgentState)
     
     workflow.add_node("supervisor", supervisor_node)
@@ -101,4 +98,4 @@ def get_graph():
     # После выполнения SQL возвращаемся к целевому агенту
     workflow.add_conditional_edges("text_to_sql_execute", return_to_origin)
     
-    return workflow.compile(checkpointer=memory)
+    return workflow.compile(checkpointer=checkpointer)

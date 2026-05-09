@@ -34,3 +34,16 @@ class ChatResponse(BaseModel):
 
 class RefreshSchemaRequest(BaseModel):
     chat_id: str
+
+
+class ChatSessionDTO(BaseModel):
+    id: str
+    datasetName: str
+    filename: str
+
+class LoadChatResponse(BaseModel):
+    db_schema: Optional[Dict[str, Any]] = None
+    messages: List[Dict[str, Any]]
+    is_waiting_for_sql: bool = False
+    sql_query: Optional[str] = None
+    charts_payload: List[Dict[str, Any]] = []
