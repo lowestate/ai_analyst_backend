@@ -12,9 +12,12 @@ class ChatCreateResponse(BaseModel):
 
 class ChatRequest(BaseModel):
     chat_id: str
+    user_id: int  # <-- НОВОЕ ПОЛЕ, из-за которого падала 422
     message: str
-    use_ai: bool
-    cols_to_remove: list[str] = []
+    use_ai: bool = False
+    cols_to_remove: List[str] = []
+    
+    # Опциональные поля для работы Text-to-SQL
     sql_action: Optional[str] = None
     sql_feedback: Optional[str] = None
     sql_query: Optional[str] = None
@@ -41,9 +44,21 @@ class ChatSessionDTO(BaseModel):
     datasetName: str
     filename: str
 
+
 class LoadChatResponse(BaseModel):
     db_schema: Optional[Dict[str, Any]] = None
     messages: List[Dict[str, Any]]
     is_waiting_for_sql: bool = False
     sql_query: Optional[str] = None
     charts_payload: List[Dict[str, Any]] = []
+    data_sample: Optional[List[Dict[str, Any]]] = None
+
+
+class UserCreate(BaseModel):
+    username: str
+    password: str
+
+
+class UserLogin(BaseModel):
+    username: str
+    password: str

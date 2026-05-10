@@ -2,6 +2,7 @@ import asyncpg
 from typing import Dict, Any
 from pydantic import BaseModel
 
+from app.config import logger
 
 class DBCredentials(BaseModel):
     host: str
@@ -12,17 +13,25 @@ class DBCredentials(BaseModel):
 
 
 async def extract_schema_from_db(creds: DBCredentials) -> Dict[str, Any]:
-    # Устанавливаем подключение
-    conn = await asyncpg.connect(
-        user=creds.user,
-        password=creds.password,
-        database=creds.database,
-        host=creds.host,
-        port=creds.port
-    )
+    logger.info(f"Начало выполнения функции extract_schema_from_db для базы данных: {creds.database}")
     
     try:
+        # Устанавливаем подключение
+        conn = await asyncpg.connect(
+            user=creds.user,
+            password=creds.password,
+            database=creds.database,
+            host=creds.host,
+            port=creds.port
+        )
+        logger.info("Успешное подключение к базе данных в функции extract_schema_from_db")
+    except Exception as e:
+        logger.error(f"Ошибка при подключении к базе данных в функции extract_schema_from_db: {str(e)}")
+        raise
+
+    try:
         # 1. Получаем Foreign Keys (Внешние ключи и связи между таблицами)
+        logger.info("Выполнение запроса на получение внешних ключей (fk_query)")
         fk_query = """
             SELECT
                 tc.table_name AS source_table,
@@ -36,6 +45,7 @@ async def extract_schema_from_db(creds: DBCredentials) -> Dict[str, Any]:
             WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = 'public';
         """
         fk_records = await conn.fetch(fk_query)
+        logger.info(f"Успешно получено {len(fk_records)} записей внешних ключей (fk_records)")
         
         relations = []
         fk_set = set() # Сет для быстрого поиска: (table_name, column_name)
@@ -48,6 +58,7 @@ async def extract_schema_from_db(creds: DBCredentials) -> Dict[str, Any]:
                 relations.append(rel)
 
         # 2. Получаем Primary Keys (Первичные ключи)
+        logger.info("Выполнение запроса на получение первичных ключей (pk_query)")
         pk_query = """
             SELECT kcu.table_name, kcu.column_name
             FROM information_schema.table_constraints tco
@@ -57,8 +68,10 @@ async def extract_schema_from_db(creds: DBCredentials) -> Dict[str, Any]:
         """
         pk_records = await conn.fetch(pk_query)
         pk_set = set((row["table_name"], row["column_name"]) for row in pk_records)
+        logger.info(f"Успешно получено {len(pk_records)} записей первичных ключей (pk_records)")
 
         # 3. Получаем все таблицы и их столбцы
+        logger.info("Выполнение запроса на получение всех таблиц и столбцов (cols_query)")
         cols_query = """
             SELECT table_name, column_name, data_type
             FROM information_schema.columns
@@ -66,6 +79,7 @@ async def extract_schema_from_db(creds: DBCredentials) -> Dict[str, Any]:
             ORDER BY table_name, ordinal_position;
         """
         cols_records = await conn.fetch(cols_query)
+        logger.info(f"Успешно получено {len(cols_records)} записей информации о столбцах (cols_records)")
 
         tables_dict = {}
         for row in cols_records:
@@ -88,32 +102,59 @@ async def extract_schema_from_db(creds: DBCredentials) -> Dict[str, Any]:
                 
             tables_dict[t_name]["columns"].append(col_info)
 
-        return {
+        result = {
             "tables": list(tables_dict.values()),
             "relations": relations
         }
+        logger.info(f"Успешное завершение extract_schema_from_db. Сформирована схема: таблиц - {len(result['tables'])}, связей - {len(result['relations'])}")
+        return result
+
+    except Exception as e:
+        logger.error(f"Ошибка во время извлечения схемы базы данных в функции extract_schema_from_db: {str(e)}")
+        raise
 
     finally:
         # Всегда закрываем соединение!
         await conn.close()
+        logger.info("Соединение с базой данных закрыто в блоке finally функции extract_schema_from_db")
+
 
 async def execute_sql_query(creds_dict: dict, query: str) -> list[dict]:
     """Выполняет подтвержденный SQL запрос к БД. Разрешены только SELECT."""
-    if not query.strip().upper().startswith("SELECT"):
-        raise ValueError("Разрешены только SELECT запросы в целях безопасности.")
-        
-    conn = await asyncpg.connect(
-        user=creds_dict["user"],
-        password=creds_dict["password"],
-        database=creds_dict["database"],
-        host=creds_dict["host"],
-        port=creds_dict["port"]
-    )
+    logger.info(f"Начало выполнения функции execute_sql_query. Длина запроса query: {len(query)} символов")
     
+    if not query.strip().upper().startswith("SELECT"):
+        error_msg = "Разрешены только SELECT запросы в целях безопасности."
+        logger.warning(f"Заблокирована попытка выполнения небезопасного запроса в execute_sql_query. Запрос: {query}. Ошибка: {error_msg}")
+        raise ValueError(error_msg)
+        
+    try:
+        conn = await asyncpg.connect(
+            user=creds_dict["user"],
+            password=creds_dict["password"],
+            database=creds_dict["database"],
+            host=creds_dict["host"],
+            port=creds_dict["port"]
+        )
+        logger.info("Успешное подключение к базе данных в функции execute_sql_query")
+    except Exception as e:
+        logger.error(f"Ошибка при подключении к базе данных в функции execute_sql_query: {str(e)}")
+        raise
+        
     try:
         # Выполняем запрос
+        logger.info("Выполнение SQL запроса (query)")
         records = await conn.fetch(query)
+        
         # Преобразуем записи в список словарей
-        return [dict(r) for r in records]
+        result = [dict(r) for r in records]
+        logger.info(f"Успешное выполнение execute_sql_query. Получено {len(result)} строк результата (result)")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Ошибка при выполнении SQL запроса в функции execute_sql_query: {str(e)}. Проблемный запрос: {query}")
+        raise
+        
     finally:
         await conn.close()
+        logger.info("Соединение с базой данных закрыто в блоке finally функции execute_sql_query")

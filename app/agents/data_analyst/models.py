@@ -1,3 +1,4 @@
+from app.config import logger
 from app.agents.client import llm
 from app.agents.data_analyst.tools import (
     analyze_columns,
@@ -31,3 +32,4 @@ class DataAnalystModel:
 
 # Создаем инстанс ЗДЕСЬ, и импортируем его потом в data_analyst/nodes.py
 da_agent_instance = DataAnalystModel()
+logger.info("создан инстанс агента da_agent")

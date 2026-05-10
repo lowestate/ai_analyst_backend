@@ -1,4 +1,4 @@
-from typing import TypedDict, Annotated, Sequence, Dict, Any, Optional
+from typing import TypedDict, Annotated, Sequence, Dict, Any, Optional, List
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
 
@@ -7,6 +7,7 @@ class AgentState(TypedDict):
     chat_id: str
     charts_payload: Sequence[Dict[str, Any]]
     next_agent: str
+    data_sample: List[Dict[str, Any]]
 
     # Поля для БД
     data_source: str # "file" или "db"

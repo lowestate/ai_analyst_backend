@@ -1,10 +1,19 @@
 import json
 import uuid
-from typing import Dict, Any
-from fastapi import APIRouter, HTTPException, UploadFile, File, Depends, Request
+from typing import Any
+import bcrypt
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    UploadFile,
+    File,
+    Depends,
+    Form
+)
 from langchain_core.messages import HumanMessage, AIMessage
 from fastapi import APIRouter
 import asyncpg
+import pickle
 
 from app.database import pool
 from app.users_db_interaction import DBCredentials, extract_schema_from_db
@@ -13,274 +22,547 @@ from app.api.schemas import (
     ChatRequest,
     ChatResponse,
     RefreshSchemaRequest,
-    ChatSessionDTO,
-    LoadChatResponse
+    LoadChatResponse,
+    UserCreate,
+    UserLogin
 )
-from app.config import logger, redis_client
-from app.agents.supervisor.mock_router import route_mock_request
-assert redis_client is not None, "Redis client must be initialized"
+from app.config import logger
 from app.agents.core.initial_invoke import generate_initial_metadata
 from app.agents.core.utils import process_upload, serialize
 from app.agents.data_analyst.mock.mock_handlers import DA_MOCK_REGISTRY, DAMockCommands
 from app.agents.finance_agent.mock.mock_handlers import FIN_MOCK_REGISTRY, FinMockCommands
-
+from app.agents.supervisor.mock_router import route_mock_request
+from app.agents.graph import app_graph
 
 router = APIRouter()
 
-def get_app_graph(request: Request) -> Any:
-    """Берет граф из глобального состояния приложения"""
-    # Достаем граф из app.state
-    graph = getattr(request.app.state, "graph", None)
-    
-    if graph is None:
-        raise HTTPException(status_code=503, detail="Граф еще не инициализирован сервером")
-        
-    return graph
+def get_app_graph() -> Any:
+    """Возвращает глобальный скомпилированный граф LangGraph"""
+    logger.info("Запрос app_graph")
+
+    if app_graph is None:
+        logger.error("app_graph не инициализирован")
+        raise HTTPException(status_code=503, detail="Ошибка инициализации графа на сервере")
+
+    return app_graph
+
 
 @router.post("/upload", response_model=ChatCreateResponse)
 async def upload_dataset(
     file: UploadFile = File(...),
+    user_id: int = Form(...),
     graph: Any = Depends(get_app_graph)
 ):
-    # ==========================================
-    # ВЕТКА 1: Подключение к БД PostgreSQL
-    # ==========================================
+    logger.info(f"upload_dataset user_id={user_id} filename={file.filename}")
+
     if file.filename and file.filename.endswith(".json"):
-        content = await file.read()
-        payload = json.loads(content)
-        
+        logger.info(f"Обработка JSON подключения filename={file.filename}")
+
+        try:
+            content = await file.read()
+            payload = json.loads(content)
+            logger.info("JSON файл успешно прочитан")
+
+        except Exception as e:
+            logger.error(f"Ошибка чтения JSON файла: {str(e)}", exc_info=True)
+            raise HTTPException(status_code=400, detail=f"Ошибка JSON файла: {str(e)}")
+
         if payload.get("type") == "postgresql":
             creds = DBCredentials(**payload["credentials"])
+
+            logger.info(f"Подключение к PostgreSQL database={creds.database}")
+
             try:
                 db_schema = await extract_schema_from_db(creds)
+
+                logger.info(f"Схема БД получена tables={len(db_schema['tables'])}")
+
                 all_columns = []
+
                 for table in db_schema["tables"]:
+                    logger.info(f"Обработка таблицы table={table['name']}")
+
                     all_columns.extend([c["name"] for c in table["columns"]])
-                
+
                 unique_suffix = uuid.uuid4().hex[:8]
                 chat_id = f"db_chat_{creds.database}_{unique_suffix}"
-                
+
+                logger.info(f"Создан DB chat_id={chat_id}")
+
                 db_summary = f"База данных PostgreSQL: {creds.database}"
                 init_msg = f"Успешное подключение к базе данных `{creds.database}`. Найдено {len(db_schema['tables'])} таблиц. Я готов писать SQL-запросы для проведения финансового анализа."
-                
+
+                async with pool.connection() as conn:
+                    await conn.execute(
+                        """INSERT INTO chats (chat_id, user_id, chat_desc, filename, dataset_encoded) 
+                           VALUES (%s, %s, %s, %s, %s)""",
+                        (chat_id, user_id, db_summary, file.filename, None)
+                    )
+
+                logger.info(f"DB чат сохранен chat_id={chat_id}")
+
                 config = {"configurable": {"thread_id": chat_id, "chat_id": chat_id}}
+
                 initial_messages = [
                     HumanMessage(content=f"Подключена база данных {creds.database}. Используй Text-to-SQL для получения данных."),
                     AIMessage(content=init_msg)
                 ]
-                                
+
                 await graph.aupdate_state(config, {
-                    "messages": initial_messages, 
-                    "chat_id": chat_id, 
+                    "messages": initial_messages,
+                    "chat_id": chat_id,
                     "charts_payload": [],
                     "data_source": "db",
                     "db_schema": db_schema,
                     "db_credentials": creds.model_dump(),
-                    "waiting_for_sql_approval": False
+                    "waiting_for_sql_approval": False,
+                    "data_sample": []
                 }, as_node="__start__")
-                
-                # Сохраняем сессию (используем db_summary вместо init_data и file.filename)
-                async with pool.connection() as conn:
-                    await conn.execute(
-                        "INSERT INTO chat_sessions (chat_id, dataset_name, filename) VALUES (%s, %s, %s)",
-                        (chat_id, db_summary, file.filename)
-                    )
+
+                logger.info(f"Состояние графа обновлено chat_id={chat_id}")
 
                 return ChatCreateResponse(
-                    chat_id=chat_id, preprocessing_report=init_msg,
-                    dataset_summary=db_summary, columns=list(set(all_columns)), db_schema=db_schema
+                    chat_id=chat_id,
+                    preprocessing_report=init_msg,
+                    dataset_summary=db_summary,
+                    columns=list(set(all_columns)),
+                    db_schema=db_schema
                 )
+
             except Exception as e:
+                logger.error(f"Ошибка подключения к БД database={creds.database}: {str(e)}", exc_info=True)
                 raise HTTPException(status_code=400, detail=f"Ошибка подключения к БД: {str(e)}")
 
-    # ==========================================
-    # ВЕТКА 2: Загрузка обычного файла (CSV / Excel)
-    # ==========================================
-    chat_id, filename, stats, columns = process_upload(file.file, file.filename)
-    logger.info("process_upload DONE")
-    init_data = await generate_initial_metadata(filename, columns, stats)
-    
-    config = {"configurable": {"thread_id": chat_id, "chat_id": chat_id}}
-    
-    initial_messages = [
-        HumanMessage(content=f"Файл {filename} загружен для проведения анализа."),
-        AIMessage(content=init_data.initial_message)
-    ]
-    logger.info(f"initial_messages={initial_messages}")
-        
-    await graph.aupdate_state(config, {
-        "messages": initial_messages, 
-        "chat_id": chat_id, 
-        "charts_payload": []
-    }, as_node="__start__")
+    try:
+        logger.info(f"Запуск process_upload filename={file.filename}")
 
-    # Сохраняем сессию и для обычных файлов
+        # 1. Читаем и чистим файл
+        chat_id, filename, stats, columns, df_cleaned = process_upload(file.file, file.filename)
+
+        logger.info(f"Файл обработан chat_id={chat_id} rows={len(df_cleaned)} cols={len(columns)}")
+
+        # 2. Подготавливаем данные
+        data_sample = df_cleaned.head(5).fillna("").to_dict(orient="records")
+        dataset_bytes = pickle.dumps(df_cleaned)
+
+        logger.info(f"Данные подготовлены chat_id={chat_id}")
+
+    except Exception as e:
+        logger.error(f"Ошибка обработки файла filename={file.filename}: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=400, detail=f"Ошибка чтения файла: {str(e)}")
+
+    try:
+        logger.info(f"Генерация metadata chat_id={chat_id}")
+
+        init_data = await generate_initial_metadata(filename, columns, stats)
+
+        chat_title = init_data.chat_title
+        init_msg = init_data.initial_message
+
+        logger.info(f"Metadata сгенерированы chat_id={chat_id}")
+
+    except Exception as e:
+        logger.warning(f"Ошибка generate_initial_metadata chat_id={chat_id}: {str(e)}", exc_info=True)
+
+        chat_title = f"Анализ {filename}"
+        init_msg = f"Данные '{filename}' загружены и готовы к работе. (Генерация умного приветствия недоступна: ошибка сети)."
+
     async with pool.connection() as conn:
         await conn.execute(
-            "INSERT INTO chat_sessions (chat_id, dataset_name, filename) VALUES (%s, %s, %s)",
-            (chat_id, init_data.chat_title, filename)
+            """INSERT INTO chats (chat_id, user_id, chat_desc, filename, dataset_encoded) 
+               VALUES (%s, %s, %s, %s, %s)""",
+            (chat_id, user_id, chat_title, filename, dataset_bytes)
         )
 
+    logger.info(f"Чат сохранен chat_id={chat_id}")
+
+    config = {"configurable": {"thread_id": chat_id, "chat_id": chat_id}}
+
+    initial_messages = [
+        HumanMessage(content=f"Файл {filename} загружен для проведения анализа."),
+        AIMessage(content=init_msg)
+    ]
+
+    await graph.aupdate_state(config, {
+        "messages": initial_messages,
+        "chat_id": chat_id,
+        "charts_payload": [],
+        "data_sample": data_sample
+    }, as_node="__start__")
+
+    logger.info(f"Граф инициализирован chat_id={chat_id}")
+
     return ChatCreateResponse(
-        chat_id=chat_id, 
-        preprocessing_report=init_data.initial_message,
-        dataset_summary=init_data.chat_title,
+        chat_id=chat_id,
+        preprocessing_report=init_msg,
+        dataset_summary=chat_title,
         columns=columns,
         db_schema=None
     )
+
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat_interaction(
     req: ChatRequest,
     graph: Any = Depends(get_app_graph)
 ):
-    logger.info(f"new request: {req}")
+    logger.info(f"chat_interaction chat_id={req.chat_id} user_id={req.user_id} use_ai={req.use_ai}")
+
+    # 1. ПРОВЕРКА ДОСТУПА И ПОЛУЧЕНИЕ ДАННЫХ
+    # Проверяем, существует ли чат и принадлежит ли он юзеру
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT user_id, dataset_encoded FROM chats WHERE chat_id = %s",
+                (req.chat_id,)
+            )
+            row = await cur.fetchone()
+
+    if not row:
+        logger.warning(f"Чат не найден chat_id={req.chat_id}")
+        raise HTTPException(status_code=404, detail="Чат не найден")
+
+    owner_id, dataset_bytes = row
+
+    # Проверка прав (Вася может писать только в свои чаты)
+    if owner_id != req.user_id:
+        logger.warning(f"Запрещен доступ chat_id={req.chat_id} user_id={req.user_id}")
+        raise HTTPException(status_code=403, detail="Доступ запрещен")
+
     config = {
         "configurable": {
             "thread_id": req.chat_id,
             "chat_id": req.chat_id
         }
     }
-    
-    # 1. Проверяем, ждет ли граф подтверждения SQL от пользователя
+
+    # 2. Проверяем состояние графа (HITL)
     state_snap = await graph.aget_state(config)
     current_state = state_snap.values
     is_waiting = current_state.get("waiting_for_sql_approval", False)
-    
+
+    logger.info(f"Состояние графа получено chat_id={req.chat_id} waiting_for_sql={is_waiting}")
+
     # ==========================================
     # ВЕТКА A: Ответ на генерацию SQL (HITL)
     # ==========================================
     if is_waiting and req.sql_action:
-        logger.info(f"Получен ответ по SQL: {req.sql_action}. Комментарий: {req.sql_feedback}")
-        
+        logger.info(f"SQL action={req.sql_action} chat_id={req.chat_id}")
+
         updates = {
             "sql_action": req.sql_action,
             "sql_feedback": req.sql_feedback if req.sql_action == "reject" else ""
         }
-        
+
         if req.sql_action == "approve" and req.sql_query:
+            logger.info(f"SQL query approved chat_id={req.chat_id}")
             updates["sql_query"] = req.sql_query
-            
-        # ИСПРАВЛЕНИЕ: Передаем updates напрямую в ainvoke. 
-        # Это "пнет" граф, заставит его проснуться, обновить стейт 
-        # и пойти в entry_router, который перенаправит поток в text_to_sql_execute.
+
         final_state = await graph.ainvoke(updates, config=config)
+
+        logger.info(f"SQL ветка завершена chat_id={req.chat_id}")
 
     # ==========================================
     # ВЕТКА B: Обычный новый запрос в чат
     # ==========================================
     else:
+        # Сбрасываем графики перед новым ходом
         await graph.aupdate_state(config, {"charts_payload": []}, as_node="__start__")
+
+        logger.info(f"charts_payload очищен chat_id={req.chat_id}")
+
         user_message = req.message
-        
-        # --- МОКОВЫЙ РЕЖИМ ---
+
+        # --- МОКОВЫЙ РЕЖИМ (Исправляем ошибку "Данные устарели") ---
         if not req.use_ai:
-            logger.info("MOCK MODE: Перехват запроса чата")
-            
+            logger.info(f"MOCK режим chat_id={req.chat_id}")
+
+            # Если это чат по файлу, восстанавливаем DF из байтов
+            df = None
+
+            if dataset_bytes:
+                try:
+                    df = pickle.loads(dataset_bytes)
+                    logger.info(f"Dataset восстановлен chat_id={req.chat_id}")
+
+                except Exception as e:
+                    logger.error(f"Ошибка десериализации chat_id={req.chat_id}: {str(e)}", exc_info=True)
+
             target_agent, msg_clean = route_mock_request(user_message)
-            msg_clean = msg_clean.strip('.?!') 
-            
+            msg_clean = msg_clean.strip('.?!')
+
+            logger.info(f"Mock routing target_agent={target_agent}")
+
+            active_registry = FIN_MOCK_REGISTRY if target_agent == "finance_agent" else DA_MOCK_REGISTRY
+
             handler_func = None
             extracted_args = ()
-            
-            if target_agent == "data_analyst":
-                active_registry = DA_MOCK_REGISTRY
-            elif target_agent == "finance_agent":
-                active_registry = FIN_MOCK_REGISTRY
-            else:
-                active_registry = DA_MOCK_REGISTRY
-                
+
             for pattern, func in active_registry.items():
                 match = pattern.match(msg_clean)
+
                 if match:
                     handler_func = func
-                    extracted_args = match.groups() 
+                    extracted_args = match.groups()
+
+                    logger.info(f"Найден mock handler={func.__name__}")
+
                     break
-            
+
             if handler_func:
                 try:
-                    final_message, charts = handler_func(req.chat_id, req.cols_to_remove, *extracted_args)
+                    # ВАЖНО: Твои handler_func теперь должны уметь принимать df
+                    # Либо мы меняем логику внутри них, чтобы они не лезли в кэш.
+                    # Здесь я передаю df первым аргументом вместо chat_id, если ты обновишь функции.
+                    # Если функции старые, передавай chat_id, но внутри них вызывай загрузку из БД.
+                    final_message, charts = handler_func(df, req.cols_to_remove, *extracted_args)
+
+                    logger.info(f"Mock handler выполнен handler={handler_func.__name__}")
+
                     charts = serialize(charts)
+
+                    logger.info(f"Charts сериализованы count={len(charts)}")
+
                 except Exception as e:
-                    logger.error(f"Ошибка мок-вычисления: {str(e)}")
+                    logger.error(f"Ошибка вычисления handler={handler_func.__name__}: {str(e)}", exc_info=True)
+
                     final_message = f"Ошибка вычисления: {str(e)}"
                     charts = []
-            else:
-                final_message = "Я не знаю такой команды в рамках мок-режима."
-                charts = []
-                
-            await graph.aupdate_state(
-                config, 
-                {
-                    "messages": [
-                        HumanMessage(content=msg_clean),
-                        AIMessage(content=final_message)
-                    ],
-                    "charts_payload": charts
-                }, 
-                as_node="__start__"
-            )
 
-            # В мок-режиме SQL не используется
+            else:
+                logger.warning(f"Mock handler не найден chat_id={req.chat_id}")
+
+                final_message = "Я не знаю такой команды."
+                charts = []
+
+            # Обновляем стейт графа (CustomAsyncPostgresSaver сам сохранит это в chat_checkpoints)
+            final_state_values = {
+                "messages": [
+                    HumanMessage(content=msg_clean),
+                    AIMessage(content=final_message)
+                ],
+                "charts_payload": charts
+            }
+
+            await graph.aupdate_state(config, final_state_values, as_node="__start__")
+
+            logger.info(f"Mock state обновлен chat_id={req.chat_id}")
+
             return ChatResponse(reply=final_message, charts=charts, is_waiting_for_sql=False)
 
         # --- AI РЕЖИМ ---
         inputs = {"messages": [HumanMessage(content=user_message)]}
+
+        logger.info(f"Запуск AI graph chat_id={req.chat_id}")
+
+        # LangGraph сам подтянет последний чекпоинт из БД через наш Custom Saver
         final_state = await graph.ainvoke(inputs, config=config)
 
+        logger.info(f"AI graph завершен chat_id={req.chat_id}")
+
     # ==========================================
-    # 2. Обработка финального состояния (после графа)
+    # 3. Обработка финального состояния
     # ==========================================
-    is_waiting_now = final_state.get("waiting_for_sql_approval", False)
-    
+    # Вытаскиваем значения из финального стейта (после ainvoke)
+    # Если мы были в ветке А, final_state уже есть. В ветке B он тоже есть.
+    state_values = final_state if isinstance(final_state, dict) else final_state.get("values", {})
+
+    is_waiting_now = state_values.get("waiting_for_sql_approval", False)
+
+    logger.info(f"Обработка final_state chat_id={req.chat_id} waiting_for_sql={is_waiting_now}")
+
     if is_waiting_now:
-        # Граф остановился, ждет аппрува от юзера
-        sql_query = final_state.get("sql_query", "")
+        logger.info(f"Ожидание SQL подтверждения chat_id={req.chat_id}")
+
         return ChatResponse(
-            reply="Чтобы получить данные для анализа, мне нужно выполнить SQL запрос:",
+            reply="Мне нужно выполнить SQL запрос для получения данных:",
             charts=[],
-            sql_query=sql_query,
+            sql_query=state_values.get("sql_query", ""),
             is_waiting_for_sql=True
         )
+
+    # Получаем последнее сообщение
+    messages = state_values.get("messages", [])
+
+    if not messages:
+        logger.warning(f"Пустой messages state chat_id={req.chat_id}")
+        final_message = "Нет ответа от агента."
+
     else:
-        # Граф отработал до конца (либо ответил на вопрос, либо выполнил SQL и вернул ответ)
-        raw_content = final_state["messages"][-1].content
-        
+        raw_content = messages[-1].content
+
         if isinstance(raw_content, list):
-            final_message = "".join(
-                block["text"] for block in raw_content 
-                if isinstance(block, dict) and "text" in block
-            )
+            # Используем .get("text", ""), чтобы избежать KeyError, если ключа нет
+            final_message = "".join(b.get("text", "") for b in raw_content if isinstance(b, dict))
+
         else:
             final_message = str(raw_content)
-            
-        logger.info(f"\nfinal_message={final_message}\n")
-        
-        if not final_message.strip():
-            logger.warning("LLM вернула пустой текст, применяем fallback-сообщение")
-            final_message = "Графики успешно построены. Если вам нужна дополнительная текстовая интерпретация, дайте знать."
 
-        charts = final_state.get("charts_payload", [])
-        logger.info(f"\ncharts={charts}")
+    logger.info(f"Ответ подготовлен chat_id={req.chat_id}")
+
+    return ChatResponse(
+        reply=final_message or "Графики построены.",
+        charts=state_values.get("charts_payload", []),
+        is_waiting_for_sql=False
+    )
+
+
+@router.get("/sessions")
+async def get_sessions(user_id: int):
+    """Отдает список чатов только для конкретного пользователя"""
+    logger.info(f"Получение списка чатов user_id={user_id}")
+
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT chat_id, chat_desc, filename FROM chats WHERE user_id = %s AND deleted = FALSE ORDER BY created_at ASC",
+                (user_id,)
+            )
+            rows = await cur.fetchall()
+
+    logger.info(f"Список чатов получен user_id={user_id} count={len(rows)}")
+
+    return [{"id": r[0], "datasetName": r[1], "filename": r[2]} for r in rows]
+
+@router.get("/chat/{chat_id}", response_model=LoadChatResponse)
+async def get_chat_history(
+    chat_id: str,
+    user_id: int,
+    graph: Any = Depends(get_app_graph)
+):
+    """Отдает историю сообщений и поднимает датасет из БД при открытии старого чата"""
+    logger.info(f"Получение истории chat_id={chat_id} user_id={user_id}")
+
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            # ИСПРАВЛЕНИЕ: Убрали db_schema из SQL запроса
+            await cur.execute(
+                "SELECT user_id, dataset_encoded FROM chats WHERE chat_id = %s",
+                (chat_id,)
+            )
+            row = await cur.fetchone()
+
+    # Защита: нельзя читать чужие чаты
+    if not row or row[0] != user_id:
+        logger.warning(f"Доступ к чату запрещен chat_id={chat_id} user_id={user_id}")
+        raise HTTPException(status_code=404, detail="Чат не найден или доступ запрещен")
+
+    dataset_bytes = row[1]
+
+    logger.info(f"Чат найден chat_id={chat_id}")
+
+    # "Оживляем" датафрейм, чтобы взять 5 строк для превью
+    data_sample = []
+
+    if dataset_bytes:
+        try:
+            df = pickle.loads(dataset_bytes)
+
+            logger.info(f"Dataset восстановлен chat_id={chat_id} rows={len(df)}")
+
+            data_sample = df.head(5).fillna("").to_dict(orient="records")
+
+            logger.info(f"Data sample подготовлен chat_id={chat_id}")
+
+        except Exception as e:
+            logger.error(f"Ошибка десериализации data_sample chat_id={chat_id}: {str(e)}", exc_info=True)
+
+    # Достаем сообщения и метаданные из LangGraph
+    config = {"configurable": {"thread_id": chat_id, "chat_id": chat_id}}
+
+    state_snap = await graph.aget_state(config)
+
+    logger.info(f"State graph получен chat_id={chat_id}")
+
+    messages_formatted = []
+    charts_payload = []
+    is_waiting = False
+    sql_query = None
+    db_schema = None
+
+    if state_snap and state_snap.values:
+        state_vals = state_snap.values
+        raw_messages = state_vals.get("messages", [])
         
-        return ChatResponse(
-            reply=final_message, 
-            charts=charts,
-            sql_query=None,
-            is_waiting_for_sql=False
-        )
+        charts_payload = state_vals.get("charts_payload", [])
+        db_schema = state_vals.get("db_schema")
+        is_waiting = state_vals.get("waiting_for_sql_approval", False)
+        sql_query = state_vals.get("sql_query")
+
+        for m in raw_messages:
+            if getattr(m, "type", "") == "tool":
+                continue
+
+            sender = "user" if getattr(m, "type", "") == "human" else "agent"
+            text = m.content
+            
+            if isinstance(text, list):
+                text = "".join(b.get("text", "") for b in text if isinstance(b, dict))
+                
+            text = str(text).strip()
+
+            if sender == "agent" and not text:
+                if is_waiting and m == raw_messages[-1]:
+                    text = f"Мне нужно выполнить SQL запрос:\n\n```sql\n{sql_query}\n```"
+                    messages_formatted.append({
+                        "id": str(id(m)), 
+                        "sender": sender, 
+                        "text": text,
+                        "isSqlWaiting": True 
+                    })
+                continue
+
+            messages_formatted.append({
+                "id": str(id(m)), 
+                "sender": sender, 
+                "text": text
+            })
+        logger.info(f"messages_formatted={messages_formatted}")
+        charts_payload = state_vals.get("charts_payload", [])
+
+        logger.info(f"Charts payload получен chat_id={chat_id} count={len(charts_payload)}")
+
+        db_schema = state_vals.get("db_schema")
+
+        is_waiting = state_vals.get("waiting_for_sql_approval", False)
+        sql_query = state_vals.get("sql_query")
+
+        logger.info(f"Состояние SQL approval chat_id={chat_id} waiting={is_waiting}")
+
+    else:
+        logger.warning(f"Пустой state graph chat_id={chat_id}")
+
+    logger.info(f"История чата подготовлена chat_id={chat_id}")
+
+    return LoadChatResponse(
+        messages=messages_formatted,
+        charts_payload=charts_payload,
+        data_sample=data_sample,
+        db_schema=db_schema,
+        is_waiting_for_sql=is_waiting,
+        sql_query=sql_query
+    )
+
 
 @router.get("/available_mock_commands")
 async def get_available_mock_commands():
     """
     Возвращает список всех доступных моковых команд из Enum.
     """
+    logger.info("Получение списка mock команд")
+
     da_commands = [cmd.value for cmd in DAMockCommands]
     fin_commands = [cmd.value for cmd in FinMockCommands]
+
+    logger.info(f"Mock команды загружены count={len(da_commands) + len(fin_commands)}")
+
     return {"commands": da_commands + fin_commands}
+
 
 @router.post("/test_connection")
 async def test_db_connection(creds: DBCredentials):
+    logger.info(f"Проверка подключения к БД database={creds.database} host={creds.host}")
+
     try:
         conn = await asyncpg.connect(
             user=creds.user,
@@ -290,90 +572,179 @@ async def test_db_connection(creds: DBCredentials):
             port=creds.port,
             timeout=5.0
         )
+
+        logger.info(f"Подключение к БД успешно database={creds.database}")
+
         await conn.close()
+
+        logger.info(f"Подключение к БД закрыто database={creds.database}")
+
         return {"status": "success"}
+
     except Exception as e:
+        logger.error(f"Ошибка подключения к БД database={creds.database}: {str(e)}", exc_info=True)
+
         # Возвращаем текст ошибки на фронтенд
         return {"status": "error", "message": str(e)}
-    
+
+
 @router.post("/refresh_schema")
 async def refresh_schema_endpoint(
     req: RefreshSchemaRequest,
     graph: Any = Depends(get_app_graph)
 ):
+    logger.info(f"Обновление схемы БД chat_id={req.chat_id}")
+
     # Достаем креды из памяти графа (мы их туда клали при изначальном upload)
     config = {"configurable": {"thread_id": req.chat_id, "chat_id": req.chat_id}}
+
     state = await graph.aget_state(config).values
+
+    logger.info(f"State graph загружен chat_id={req.chat_id}")
+
     creds_dict = state.get("db_credentials")
-    
+
     if not creds_dict:
+        logger.warning(f"db_credentials отсутствуют chat_id={req.chat_id}")
         raise HTTPException(status_code=400, detail="Креды для БД не найдены в текущей сессии")
-        
+
     creds = DBCredentials(**creds_dict)
-    
+
+    logger.info(f"Извлечение новой схемы database={creds.database}")
+
     # Заново извлекаем схему без дублирования SQL-кода
     new_db_schema = await extract_schema_from_db(creds)
-    
-    # Обновляем схему в стейте, чтобы сабагенты тоже видели новые колонки
-    await graph.aupdate_state(config, {"db_schema": new_db_schema}, as_node="__start__")
-    
-    return new_db_schema
 
-@router.get("/sessions", response_model=list[ChatSessionDTO])
-async def get_sessions():
-    async with pool.connection() as conn:
-        records = await conn.execute("SELECT chat_id, dataset_name, filename FROM chat_sessions ORDER BY created_at ASC")
-        rows = await records.fetchall()
-        return [{"id": r[0], "datasetName": r[1], "filename": r[2]} for r in rows]
-    
-@router.get("/chat/{chat_id}", response_model=LoadChatResponse)
-async def load_chat(
-    chat_id: str,
-    graph: Any = Depends(get_app_graph)
-):
-    config = {"configurable": {"thread_id": chat_id, "chat_id": chat_id}}
-    
-    state_snap = await graph.aget_state(config)
-    if not state_snap or not state_snap.values:
-        raise HTTPException(status_code=404, detail="История чата не найдена")
-        
-    state: Dict[str, Any] = dict(state_snap.values)
-    
-    frontend_msgs = []
-    for msg in state.get("messages", []):
-        if isinstance(msg, HumanMessage):
-            # Скрываем системные кнопки аппрувов из UI
-            if isinstance(msg.content, str) and msg.content.startswith("SQL_ACTION"): 
-                continue
-            frontend_msgs.append({"id": getattr(msg, "id", str(uuid.uuid4())), "sender": "user", "text": str(msg.content)})
-            
-        elif isinstance(msg, AIMessage):
-            content = msg.content
-            if isinstance(content, list):
-                content = "".join(b["text"] for b in content if isinstance(b, dict) and "text" in b)
-            
-            # Если это запрос на SQL, помечаем его флагом для UI
-            is_sql = "```sql" in content and "Я подготовил SQL запрос" in content
-            
-            frontend_msgs.append({
-                "id": getattr(msg, "id", str(uuid.uuid4())), 
-                "sender": "agent", 
-                "text": content,
-                "isSqlWaiting": is_sql
-            })
-            
-    return LoadChatResponse(
-        db_schema=state.get("db_schema"),
-        messages=frontend_msgs,
-        is_waiting_for_sql=state.get("waiting_for_sql_approval", False),
-        sql_query=state.get("sql_query"),
-        charts_payload=state.get("charts_payload", [])
+    logger.info(f"Новая схема получена tables={len(new_db_schema['tables'])}")
+
+    # Обновляем схему в стейте, чтобы сабагенты тоже видели новые колонки
+    await graph.aupdate_state(
+        config,
+        {"db_schema": new_db_schema},
+        as_node="__start__"
     )
 
+    logger.info(f"Схема обновлена в graph chat_id={req.chat_id}")
+
+    return new_db_schema
+
+
 @router.delete("/chat/{chat_id}")
-async def delete_chat(chat_id: str):
-    from app.database import pool
+async def delete_chat(chat_id: str, user_id: int):
+    """Удаляет чат пользователя. Стейты LangGraph удалятся каскадом (ON DELETE CASCADE)"""
+    logger.info(f"Удаление чата chat_id={chat_id} user_id={user_id}")
+
     async with pool.connection() as conn:
-        # Удаляем запись о чате из сайдбара
-        await conn.execute("DELETE FROM chat_sessions WHERE chat_id = %s", (chat_id,))
+        # Проверяем, что чат принадлежит юзеру перед удалением
+        await conn.execute(
+            "DELETE FROM chats WHERE chat_id = %s AND user_id = %s",
+            (chat_id, user_id)
+        )
+
+    logger.info(f"Чат удален chat_id={chat_id}")
+
     return {"status": "success", "message": "Чат удален"}
+
+
+@router.post("/register")
+async def register_user(user: UserCreate):
+    logger.info(f"Регистрация пользователя username={user.username}")
+
+    salt = bcrypt.gensalt()
+
+    hashed_password = bcrypt.hashpw(
+        user.password.encode('utf-8'),
+        salt
+    ).decode('utf-8')
+
+    logger.info(f"Пароль захеширован username={user.username}")
+
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            # Проверяем, существует ли пользователь
+            await cur.execute(
+                "SELECT user_id FROM users WHERE username = %s",
+                (user.username,)
+            )
+
+            if await cur.fetchone():
+                logger.warning(f"Пользователь уже существует username={user.username}")
+
+                raise HTTPException(
+                    status_code=400,
+                    detail="Пользователь с таким именем уже существует"
+                )
+
+            # Создаем пользователя
+            await cur.execute(
+                "INSERT INTO users (username, password) VALUES (%s, %s) RETURNING user_id",
+                (user.username, hashed_password)
+            )
+
+            row = await cur.fetchone()
+
+            if row:
+                new_user_id = row[0]
+
+                logger.info(f"Пользователь создан user_id={new_user_id}")
+
+            else:
+                logger.error(f"Ошибка создания пользователя username={user.username}")
+
+                raise HTTPException(
+                    status_code=500,
+                    detail="Ошибка при создании юзера"
+                )
+
+    return {
+        "status": "success",
+        "user_id": new_user_id,
+        "message": "Новый пользователь создан!"
+    }
+
+
+@router.post("/login")
+async def login_user(user: UserLogin):
+    logger.info(f"Авторизация username={user.username}")
+
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT user_id, password FROM users WHERE username = %s",
+                (user.username,)
+            )
+
+            row = await cur.fetchone()
+
+    # Если юзера нет или пароль не совпал, отдаем 401 ошибку
+    if not row:
+        logger.warning(f"Пользователь не найден username={user.username}")
+
+        raise HTTPException(
+            status_code=401,
+            detail="Неверный логин или пароль"
+        )
+
+    user_id, hashed_password = row
+
+    logger.info(f"Пользователь найден user_id={user_id}")
+
+    # Проверяем пароль
+    if not bcrypt.checkpw(
+        user.password.encode('utf-8'),
+        hashed_password.encode('utf-8')
+    ):
+        logger.warning(f"Неверный пароль user_id={user_id}")
+
+        raise HTTPException(
+            status_code=401,
+            detail="Неверный логин или пароль"
+        )
+
+    logger.info(f"Авторизация успешна user_id={user_id}")
+
+    return {
+        "status": "success",
+        "user_id": user_id,
+        "username": user.username
+    }
