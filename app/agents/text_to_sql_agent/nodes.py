@@ -1,7 +1,10 @@
 import json
+import pickle
+import pandas as pd
 from langchain_core.messages import ToolMessage, AIMessage
 
 from app.config import logger
+from app.database import pool
 from app.agents.core.state import AgentState
 from app.agents.client import llm
 from app.agents.text_to_sql_agent.prompts import TEXT_TO_SQL_PROMPT, TEXT_TO_SQL_REGENERATE_PROMPT
@@ -92,8 +95,8 @@ async def text_to_sql_execute_node(state: AgentState):
 
     tool_call_id = "unknown"
     for msg in reversed(state["messages"]):
-        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-            tool_call_id = msg.tool_calls[0]["id"]
+        if getattr(msg, "type", "") == "ai" and getattr(msg, "tool_calls", None):
+            tool_call_id = msg.tool_calls[0]["id"] # type: ignore
             break
 
     logger.info(f"text_to_sql_execute_node tool_call_id={tool_call_id}")
@@ -107,6 +110,22 @@ async def text_to_sql_execute_node(state: AgentState):
 
         logger.info(f"text_to_sql_execute_node SQL выполнен rows_size={len(result_str)}")
 
+        # Сохраняем результат SQL как DataFrame в dataset_encoded,
+        # чтобы тулы анализа (aget_df_from_db) могли его подхватить
+        if data and isinstance(data, list):
+            chat_id = state.get("chat_id")
+            try:
+                df = pd.DataFrame(data)
+                dataset_bytes = pickle.dumps(df)
+                async with pool.connection() as conn:
+                    await conn.execute(
+                        "UPDATE chats SET dataset_encoded = %s WHERE chat_id = %s",
+                        (dataset_bytes, chat_id)
+                    )
+                logger.info(f"text_to_sql_execute_node SQL результат сохранен как DataFrame chat_id={chat_id} rows={len(df)}")
+            except Exception as save_err:
+                logger.warning(f"text_to_sql_execute_node не удалось сохранить DataFrame: {save_err}")
+
         if len(result_str) > 15000:
             result_str = result_str[:15000] + "\n...[ДАННЫЕ ОБРЕЗАНЫ ДЛЯ LLM]"
             logger.warning("text_to_sql_execute_node результат обрезан")
@@ -115,8 +134,11 @@ async def text_to_sql_execute_node(state: AgentState):
         logger.error(f"text_to_sql_execute_node ошибка SQL error={str(e)}")
         result_str = f"Ошибка выполнения SQL: {str(e)}"
 
+    # === ИЗМЕНЕНИЕ ЗДЕСЬ: Вшиваем сам запрос в историю для фронтенда и LLM ===
+    final_content = f"[SQL_QUERY]\n{query}\n[/SQL_QUERY]\n{result_str}"
+
     tool_message = ToolMessage(
-        content=result_str,
+        content=final_content,
         tool_call_id=tool_call_id,
         name="request_db_query"
     )

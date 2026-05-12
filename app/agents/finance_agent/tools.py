@@ -124,10 +124,16 @@ async def analyze_unit_economics_tool(
     source_col: str,
     amount_col: str,
     cac_col: str,
-    user_col: str,
+    user_col: str = None,
     config: RunnableConfig = None
 ) -> str:
-    """Анализирует Юнит-экономику. Сравнивает LTV (выручку за всё время) и CAC (затраты) в разрезе источников трафика."""
+    """
+    [КРИТИЧЕСКИ ВАЖНО] ОБЯЗАТЕЛЬНО вызывай этот инструмент, если пользователь просит анализ юнит-экономики! 
+    Это необходимо для отрисовки интерактивного графика на фронтенде. 
+    Вызывай этот тул ДАЖЕ ЕСЛИ ты уже получил все нужные цифры через SQL-запрос (request_db_query).
+    
+    ПРАВИЛО: Имена колонок (source_col, amount_col, cac_col, user_col) передавай СТРОГО так, как они называются в схеме базы данных (на английском). КАТЕГОРИЧЕСКИ ЗАПРЕЩАЕТСЯ переводить названия колонок на русский язык!
+    """
     chat_id = config.get("configurable", {}).get("chat_id")
     logger.info(f"analyze_unit_economics_tool start chat_id={chat_id}")
 
@@ -140,11 +146,11 @@ async def analyze_unit_economics_tool(
         logger.error(f"analyze_unit_economics_tool error chat_id={chat_id} error={str(e)}")
         return str(e)
 
-
 @tool
 async def forecast_revenue_tool(
     date_col: str,
     amount_col: str,
+    forecast_periods: int = 3,
     config: RunnableConfig = None
 ) -> str:
     """Строит прогноз выручки на будущие периоды на основе исторических данных."""
@@ -153,7 +159,7 @@ async def forecast_revenue_tool(
 
     try:
         df = await aget_df_from_db(chat_id)
-        res = calc_revenue_forecast(df, date_col, amount_col)
+        res = calc_revenue_forecast(df, date_col, amount_col, forecast_periods)
         logger.info(f"forecast_revenue_tool done chat_id={chat_id}")
         return json.dumps(res, ensure_ascii=False)
     except Exception as e:

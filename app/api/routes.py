@@ -112,6 +112,7 @@ async def upload_dataset(
                     "messages": initial_messages,
                     "chat_id": chat_id,
                     "charts_payload": [],
+                    "all_charts": [],
                     "data_source": "db",
                     "db_schema": db_schema,
                     "db_credentials": creds.model_dump(),
@@ -187,6 +188,7 @@ async def upload_dataset(
         "messages": initial_messages,
         "chat_id": chat_id,
         "charts_payload": [],
+        "all_charts": [],
         "data_sample": data_sample
     }, as_node="__start__")
 
@@ -341,7 +343,8 @@ async def chat_interaction(
                     HumanMessage(content=msg_clean),
                     AIMessage(content=final_message)
                 ],
-                "charts_payload": charts
+                "charts_payload": charts,
+                "all_charts": charts
             }
 
             await graph.aupdate_state(config, final_state_values, as_node="__start__")
@@ -431,117 +434,120 @@ async def get_chat_history(
     graph: Any = Depends(get_app_graph)
 ):
     """Отдает историю сообщений и поднимает датасет из БД при открытии старого чата"""
-    logger.info(f"Получение истории chat_id={chat_id} user_id={user_id}")
-
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
-            # ИСПРАВЛЕНИЕ: Убрали db_schema из SQL запроса
-            await cur.execute(
-                "SELECT user_id, dataset_encoded FROM chats WHERE chat_id = %s",
-                (chat_id,)
-            )
+            await cur.execute("SELECT user_id, dataset_encoded FROM chats WHERE chat_id = %s", (chat_id,))
             row = await cur.fetchone()
-
+            
     # Защита: нельзя читать чужие чаты
     if not row or row[0] != user_id:
-        logger.warning(f"Доступ к чату запрещен chat_id={chat_id} user_id={user_id}")
         raise HTTPException(status_code=404, detail="Чат не найден или доступ запрещен")
 
     dataset_bytes = row[1]
-
-    logger.info(f"Чат найден chat_id={chat_id}")
-
+    
     # "Оживляем" датафрейм, чтобы взять 5 строк для превью
     data_sample = []
-
     if dataset_bytes:
         try:
             df = pickle.loads(dataset_bytes)
-
-            logger.info(f"Dataset восстановлен chat_id={chat_id} rows={len(df)}")
-
             data_sample = df.head(5).fillna("").to_dict(orient="records")
-
-            logger.info(f"Data sample подготовлен chat_id={chat_id}")
-
         except Exception as e:
-            logger.error(f"Ошибка десериализации data_sample chat_id={chat_id}: {str(e)}", exc_info=True)
+            logger.error(f"Ошибка при десериализации data_sample: {e}")
 
     # Достаем сообщения и метаданные из LangGraph
     config = {"configurable": {"thread_id": chat_id, "chat_id": chat_id}}
-
     state_snap = await graph.aget_state(config)
-
-    logger.info(f"State graph получен chat_id={chat_id}")
-
+    
     messages_formatted = []
     charts_payload = []
     is_waiting = False
     sql_query = None
     db_schema = None
-
+    
     if state_snap and state_snap.values:
         state_vals = state_snap.values
         raw_messages = state_vals.get("messages", [])
         
-        charts_payload = state_vals.get("charts_payload", [])
+        charts_payload = state_vals.get("all_charts", [])
         db_schema = state_vals.get("db_schema")
         is_waiting = state_vals.get("waiting_for_sql_approval", False)
         sql_query = state_vals.get("sql_query")
 
-        for m in raw_messages:
-            if getattr(m, "type", "") == "tool":
+        for i, m in enumerate(raw_messages):
+            m_type = getattr(m, "type", "") if not isinstance(m, dict) else m.get("type", "")
+            
+            # 1. ОБРАБОТКА ИСТОРИЧЕСКИХ (ВЫПОЛНЕННЫХ) SQL ЗАПРОСОВ
+            if m_type in ["tool", "function"] or m.__class__.__name__ in ["ToolMessage", "FunctionMessage"]:
+                content = str(getattr(m, "content", "") if not isinstance(m, dict) else m.get("content", ""))
+                
+                # Если в ответе базы зашит наш SQL-запрос, достаем его и рисуем плашку
+                if "[SQL_QUERY]" in content:
+                    sql_part = content.split("[/SQL_QUERY]")[0].replace("[SQL_QUERY]", "").strip()
+                    messages_formatted.append({
+                        "id": str(id(m)) + "_sql", 
+                        "sender": "agent", 
+                        # ИСПРАВЛЕНИЕ: Добавляем сам текст SQL запроса и флаг статуса, 
+                        # чтобы фронт покрасил его в зеленый и отрисовал текст
+                        "text": f"Мне нужно выполнить SQL запрос:\n\n```sql\n{sql_part}\n```\n\n[STATUS: approve]",
+                        "isSqlWaiting": False
+                    })
+                # Сам сырой JSON из базы на фронтенд не отправляем
                 continue
 
-            sender = "user" if getattr(m, "type", "") == "human" else "agent"
-            text = m.content
+            sender = "user" if m_type == "human" else "agent"
+            text = getattr(m, "content", "") if not isinstance(m, dict) else m.get("content", "")
             
             if isinstance(text, list):
+                # Безопасное извлечение текста
                 text = "".join(b.get("text", "") for b in text if isinstance(b, dict))
                 
             text = str(text).strip()
 
-            if sender == "agent" and not text:
-                if is_waiting and m == raw_messages[-1]:
-                    text = f"Мне нужно выполнить SQL запрос:\n\n```sql\n{sql_query}\n```"
+            # 2. ОБРАБОТКА ТЕКУЩЕГО ОЖИДАЮЩЕГО SQL ЗАПРОСА
+            tool_calls = getattr(m, "tool_calls", []) if not isinstance(m, dict) else m.get("tool_calls", [])
+            if sender == "agent" and tool_calls:
+                is_current_waiting = is_waiting and (i == len(raw_messages) - 1)
+                
+                # Если мы сейчас стоим на паузе, берем свежий SQL напрямую из стейта
+                if is_current_waiting:
+                    actual_sql = state_vals.get("sql_query", "")
                     messages_formatted.append({
                         "id": str(id(m)), 
                         "sender": sender, 
-                        "text": text,
-                        "isSqlWaiting": True 
+                        "text": f"Мне нужно выполнить SQL запрос:\n\n```sql\n{actual_sql}\n```",
+                        "isSqlWaiting": True
                     })
+                # Пропускаем системный блок с tool_calls, чтобы он не висел пустым пузырем
+                continue 
+
+            # 3. ДОБАВЛЕНИЕ ОБЫЧНЫХ СООБЩЕНИЙ
+            # Фильтруем пустые технические сообщения (например, пробросы агентов)
+            if sender == "agent" and not text:
                 continue
+
+            # === ИСПРАВЛЕНИЕ: Скрываем системные промпты, вшитые под видом пользователя ===
+            # Проверяем маркеры стартовых технических сообщений (как для БД, так и для файлов)
+            if sender == "user":
+                is_db_prompt = text.startswith("Подключена база данных") and "Используй Text-to-SQL" in text
+                # Если у тебя есть аналогичное стартовое сообщение для файлов, можешь раскомментировать строку ниже
+                # is_file_prompt = text.startswith("Загружен файл") or "Вот первые строки" in text
+                
+                if is_db_prompt: # or is_file_prompt:
+                    continue
 
             messages_formatted.append({
                 "id": str(id(m)), 
                 "sender": sender, 
                 "text": text
             })
-        logger.info(f"messages_formatted={messages_formatted}")
-        charts_payload = state_vals.get("charts_payload", [])
 
-        logger.info(f"Charts payload получен chat_id={chat_id} count={len(charts_payload)}")
-
-        db_schema = state_vals.get("db_schema")
-
-        is_waiting = state_vals.get("waiting_for_sql_approval", False)
-        sql_query = state_vals.get("sql_query")
-
-        logger.info(f"Состояние SQL approval chat_id={chat_id} waiting={is_waiting}")
-
-    else:
-        logger.warning(f"Пустой state graph chat_id={chat_id}")
-
-    logger.info(f"История чата подготовлена chat_id={chat_id}")
-
-    return LoadChatResponse(
-        messages=messages_formatted,
-        charts_payload=charts_payload,
-        data_sample=data_sample,
-        db_schema=db_schema,
-        is_waiting_for_sql=is_waiting,
-        sql_query=sql_query
-    )
+    return {
+        "chat_id": chat_id,
+        "messages": messages_formatted,
+        "data_sample": data_sample,
+        "charts_payload": charts_payload,
+        "db_schema": db_schema
+    }
 
 
 @router.get("/available_mock_commands")
@@ -598,7 +604,14 @@ async def refresh_schema_endpoint(
     # Достаем креды из памяти графа (мы их туда клали при изначальном upload)
     config = {"configurable": {"thread_id": req.chat_id, "chat_id": req.chat_id}}
 
-    state = await graph.aget_state(config).values
+    # ИСПРАВЛЕНИЕ: Сначала дожидаемся (await) результата, потом берем values
+    state_snap = await graph.aget_state(config)
+    
+    if not state_snap or not state_snap.values:
+        logger.warning(f"Стейт графа пуст chat_id={req.chat_id}")
+        raise HTTPException(status_code=404, detail="История чата или стейт не найдены")
+        
+    state = state_snap.values
 
     logger.info(f"State graph загружен chat_id={req.chat_id}")
 

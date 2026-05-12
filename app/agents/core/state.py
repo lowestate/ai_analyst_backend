@@ -1,3 +1,4 @@
+import operator
 from typing import TypedDict, Annotated, Sequence, Dict, Any, Optional, List
 from langchain_core.messages import BaseMessage
 from langgraph.graph.message import add_messages
@@ -6,6 +7,7 @@ class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     chat_id: str
     charts_payload: Sequence[Dict[str, Any]]
+    all_charts: Annotated[list, operator.add]  # Все графики чата (аккумулятивно)
     next_agent: str
     data_sample: List[Dict[str, Any]]
 

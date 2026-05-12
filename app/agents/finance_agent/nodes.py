@@ -20,7 +20,7 @@ def finance_agent_model_node(state: AgentState):
     }
 
 
-def finance_agent_tool_node(state: AgentState):
+async def finance_agent_tool_node(state: AgentState):
     last_message = state['messages'][-1]
     tool_messages = []
     charts_payload = []
@@ -36,7 +36,7 @@ def finance_agent_tool_node(state: AgentState):
         config = {"configurable": {"chat_id": state.get("chat_id")}}
         
         try:
-            response = tool_instance.invoke(args, config=config)
+            response = await tool_instance.ainvoke(args, config=config)
             logger.info(f"tool выполнен успешно name={tool_call['name']}")
         except Exception as e:
             logger.error(f"ошибка выполнения tool name={tool_call['name']} error={str(e)}")
@@ -65,5 +65,6 @@ def finance_agent_tool_node(state: AgentState):
     
     return {
         "messages": tool_messages,
-        "charts_payload": list(state.get("charts_payload", [])) + charts_payload
+        "charts_payload": list(state.get("charts_payload", [])) + charts_payload,
+        "all_charts": charts_payload
     }

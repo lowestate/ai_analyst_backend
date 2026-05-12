@@ -26,7 +26,7 @@ def data_analyst_model_node(state: AgentState):
     }
 
 
-def data_analyst_tool_node(state: AgentState):
+async def data_analyst_tool_node(state: AgentState):
     """Узел исполнения инструментов для агента Аналитика Данных"""
     last_message = state['messages'][-1]
     tool_messages = []
@@ -42,7 +42,7 @@ def data_analyst_tool_node(state: AgentState):
         args.pop("chat_id", None)
 
         config = {"configurable": {"chat_id": state.get("chat_id")}}
-        response = tool_instance.invoke(args, config=config)
+        response = await tool_instance.ainvoke(args, config=config)
         logger.info(f"data_analyst_tool_node: выполнен tool={tool_call['name']}")
 
         try:
@@ -71,5 +71,6 @@ def data_analyst_tool_node(state: AgentState):
 
     return {
         "messages": tool_messages,
-        "charts_payload": list(state.get("charts_payload", [])) + charts_payload
+        "charts_payload": list(state.get("charts_payload", [])) + charts_payload,
+        "all_charts": charts_payload
     }
