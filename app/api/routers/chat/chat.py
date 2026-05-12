@@ -1,7 +1,6 @@
 import json
 import uuid
 from typing import Any
-import bcrypt
 from fastapi import (
     APIRouter,
     HTTPException,
@@ -12,19 +11,16 @@ from fastapi import (
 )
 from langchain_core.messages import HumanMessage, AIMessage
 from fastapi import APIRouter
-import asyncpg
 import pickle
 
 from app.database import pool
+from app.api.dependencies import get_app_graph
 from app.users_db_interaction import DBCredentials, extract_schema_from_db
-from app.api.schemas import (
+from app.api.routers.chat.models import (
     ChatCreateResponse,
     ChatRequest,
     ChatResponse,
-    RefreshSchemaRequest,
     LoadChatResponse,
-    UserCreate,
-    UserLogin
 )
 from app.config import logger
 from app.agents.core.initial_invoke import generate_initial_metadata
@@ -32,20 +28,8 @@ from app.agents.core.utils import process_upload, serialize
 from app.agents.data_analyst.mock.mock_handlers import DA_MOCK_REGISTRY, DAMockCommands
 from app.agents.finance_agent.mock.mock_handlers import FIN_MOCK_REGISTRY, FinMockCommands
 from app.agents.supervisor.mock_router import route_mock_request
-from app.agents.graph import app_graph
 
-router = APIRouter()
-
-def get_app_graph() -> Any:
-    """Возвращает глобальный скомпилированный граф LangGraph"""
-    logger.info("Запрос app_graph")
-
-    if app_graph is None:
-        logger.error("app_graph не инициализирован")
-        raise HTTPException(status_code=503, detail="Ошибка инициализации графа на сервере")
-
-    return app_graph
-
+router = APIRouter(tags=["Chat"])
 
 @router.post("/upload", response_model=ChatCreateResponse)
 async def upload_dataset(
@@ -564,84 +548,6 @@ async def get_available_mock_commands():
 
     return {"commands": da_commands + fin_commands}
 
-
-@router.post("/test_connection")
-async def test_db_connection(creds: DBCredentials):
-    logger.info(f"Проверка подключения к БД database={creds.database} host={creds.host}")
-
-    try:
-        conn = await asyncpg.connect(
-            user=creds.user,
-            password=creds.password,
-            database=creds.database,
-            host=creds.host,
-            port=creds.port,
-            timeout=5.0
-        )
-
-        logger.info(f"Подключение к БД успешно database={creds.database}")
-
-        await conn.close()
-
-        logger.info(f"Подключение к БД закрыто database={creds.database}")
-
-        return {"status": "success"}
-
-    except Exception as e:
-        logger.error(f"Ошибка подключения к БД database={creds.database}: {str(e)}", exc_info=True)
-
-        # Возвращаем текст ошибки на фронтенд
-        return {"status": "error", "message": str(e)}
-
-
-@router.post("/refresh_schema")
-async def refresh_schema_endpoint(
-    req: RefreshSchemaRequest,
-    graph: Any = Depends(get_app_graph)
-):
-    logger.info(f"Обновление схемы БД chat_id={req.chat_id}")
-
-    # Достаем креды из памяти графа (мы их туда клали при изначальном upload)
-    config = {"configurable": {"thread_id": req.chat_id, "chat_id": req.chat_id}}
-
-    # ИСПРАВЛЕНИЕ: Сначала дожидаемся (await) результата, потом берем values
-    state_snap = await graph.aget_state(config)
-    
-    if not state_snap or not state_snap.values:
-        logger.warning(f"Стейт графа пуст chat_id={req.chat_id}")
-        raise HTTPException(status_code=404, detail="История чата или стейт не найдены")
-        
-    state = state_snap.values
-
-    logger.info(f"State graph загружен chat_id={req.chat_id}")
-
-    creds_dict = state.get("db_credentials")
-
-    if not creds_dict:
-        logger.warning(f"db_credentials отсутствуют chat_id={req.chat_id}")
-        raise HTTPException(status_code=400, detail="Креды для БД не найдены в текущей сессии")
-
-    creds = DBCredentials(**creds_dict)
-
-    logger.info(f"Извлечение новой схемы database={creds.database}")
-
-    # Заново извлекаем схему без дублирования SQL-кода
-    new_db_schema = await extract_schema_from_db(creds)
-
-    logger.info(f"Новая схема получена tables={len(new_db_schema['tables'])}")
-
-    # Обновляем схему в стейте, чтобы сабагенты тоже видели новые колонки
-    await graph.aupdate_state(
-        config,
-        {"db_schema": new_db_schema},
-        as_node="__start__"
-    )
-
-    logger.info(f"Схема обновлена в graph chat_id={req.chat_id}")
-
-    return new_db_schema
-
-
 @router.delete("/chat/{chat_id}")
 async def delete_chat(chat_id: str, user_id: int):
     """Удаляет чат пользователя. Стейты LangGraph удалятся каскадом (ON DELETE CASCADE)"""
@@ -657,107 +563,3 @@ async def delete_chat(chat_id: str, user_id: int):
     logger.info(f"Чат удален chat_id={chat_id}")
 
     return {"status": "success", "message": "Чат удален"}
-
-
-@router.post("/register")
-async def register_user(user: UserCreate):
-    logger.info(f"Регистрация пользователя username={user.username}")
-
-    salt = bcrypt.gensalt()
-
-    hashed_password = bcrypt.hashpw(
-        user.password.encode('utf-8'),
-        salt
-    ).decode('utf-8')
-
-    logger.info(f"Пароль захеширован username={user.username}")
-
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            # Проверяем, существует ли пользователь
-            await cur.execute(
-                "SELECT user_id FROM users WHERE username = %s",
-                (user.username,)
-            )
-
-            if await cur.fetchone():
-                logger.warning(f"Пользователь уже существует username={user.username}")
-
-                raise HTTPException(
-                    status_code=400,
-                    detail="Пользователь с таким именем уже существует"
-                )
-
-            # Создаем пользователя
-            await cur.execute(
-                "INSERT INTO users (username, password) VALUES (%s, %s) RETURNING user_id",
-                (user.username, hashed_password)
-            )
-
-            row = await cur.fetchone()
-
-            if row:
-                new_user_id = row[0]
-
-                logger.info(f"Пользователь создан user_id={new_user_id}")
-
-            else:
-                logger.error(f"Ошибка создания пользователя username={user.username}")
-
-                raise HTTPException(
-                    status_code=500,
-                    detail="Ошибка при создании юзера"
-                )
-
-    return {
-        "status": "success",
-        "user_id": new_user_id,
-        "message": "Новый пользователь создан!"
-    }
-
-
-@router.post("/login")
-async def login_user(user: UserLogin):
-    logger.info(f"Авторизация username={user.username}")
-
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT user_id, password FROM users WHERE username = %s",
-                (user.username,)
-            )
-
-            row = await cur.fetchone()
-
-    # Если юзера нет или пароль не совпал, отдаем 401 ошибку
-    if not row:
-        logger.warning(f"Пользователь не найден username={user.username}")
-
-        raise HTTPException(
-            status_code=401,
-            detail="Неверный логин или пароль"
-        )
-
-    user_id, hashed_password = row
-
-    logger.info(f"Пользователь найден user_id={user_id}")
-
-    # Проверяем пароль
-    if not bcrypt.checkpw(
-        user.password.encode('utf-8'),
-        hashed_password.encode('utf-8')
-    ):
-        logger.warning(f"Неверный пароль user_id={user_id}")
-
-        raise HTTPException(
-            status_code=401,
-            detail="Неверный логин или пароль"
-        )
-
-    logger.info(f"Авторизация успешна user_id={user_id}")
-
-    return {
-        "status": "success",
-        "user_id": user_id,
-        "username": user.username
-    }

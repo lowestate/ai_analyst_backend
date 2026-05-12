@@ -14,7 +14,9 @@ if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from app.database import pool
-from app.api.routes import router
+from app.api.routers.db import db
+from app.api.routers.users import users
+from app.api.routers.chat import chat
 from app.config import logger
 
 @asynccontextmanager
@@ -39,7 +41,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(router)
+app.include_router(users.router)
+app.include_router(db.router)
+app.include_router(chat.router)
 
 if __name__ == "__main__":
     uvicorn.run(

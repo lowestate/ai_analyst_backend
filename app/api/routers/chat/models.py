@@ -35,10 +35,6 @@ class ChatResponse(BaseModel):
     is_waiting_for_sql: bool = False
 
 
-class RefreshSchemaRequest(BaseModel):
-    chat_id: str
-
-
 class ChatSessionDTO(BaseModel):
     id: str
     datasetName: str
@@ -52,13 +48,3 @@ class LoadChatResponse(BaseModel):
     sql_query: Optional[str] = None
     charts_payload: List[Dict[str, Any]] = []
     data_sample: Optional[List[Dict[str, Any]]] = None
-
-
-class UserCreate(BaseModel):
-    username: str
-    password: str
-
-
-class UserLogin(BaseModel):
-    username: str
-    password: str
