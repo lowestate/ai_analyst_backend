@@ -1,6 +1,6 @@
 import asyncpg
 from typing import Dict, Any, Optional
-from datetime import datetime, timezone
+from datetime import datetime
 from pydantic import BaseModel
 
 from app.config import logger

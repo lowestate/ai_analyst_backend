@@ -1,5 +1,6 @@
 import time
 from datetime import datetime, timezone
+from typing import Any, Dict
 from pydantic import BaseModel, Field
 
 from app.config import logger
@@ -34,7 +35,7 @@ async def supervisor_node(state: AgentState):
     start_ts = time.monotonic()
 
     try:
-        raw_result = await structured_llm.ainvoke([system_message, user_message])
+        raw_result: Dict[str, Any] = await structured_llm.ainvoke([system_message, user_message])  # type: ignore[assignment]
         logger.info("supervisor_node LLM ответ получен")
     except Exception as e:
         duration_ms = int((time.monotonic() - start_ts) * 1000)

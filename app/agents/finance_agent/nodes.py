@@ -115,8 +115,8 @@ async def finance_agent_tool_node(state: AgentState):
             content = response
             logger.error(f"JSON decode error в tool name={tool_call['name']}")
 
-        tool_messages.append(ToolMessage(content=content, tool_call_id=tool_call["id"]))
-
+        tool_messages.append(ToolMessage(content=str(content), tool_call_id=tool_call["id"]))
+    
     logger.info("finance_agent_tool_node: обработка tool_calls завершена")
 
     return {

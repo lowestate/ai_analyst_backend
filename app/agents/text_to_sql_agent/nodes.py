@@ -3,6 +3,7 @@ import time
 import pickle
 import pandas as pd
 from datetime import datetime, timezone
+from typing import Any, Dict
 from langchain_core.messages import ToolMessage, AIMessage
 
 from app.config import logger
@@ -53,7 +54,7 @@ async def text_to_sql_generate_node(state: AgentState):
     start_ts = time.monotonic()
 
     try:
-        raw_result = await llm_instance.ainvoke([{"role": "user", "content": prompt}])
+        raw_result: Dict[str, Any] = await llm_instance.ainvoke([{"role": "user", "content": prompt}])  # type: ignore[assignment]
         logger.info("text_to_sql_generate_node LLM выполнен успешно")
     except Exception as e:
         duration_ms = int((time.monotonic() - start_ts) * 1000)

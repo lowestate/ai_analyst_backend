@@ -137,7 +137,7 @@ async def data_analyst_tool_node(state: AgentState):
             content = response
             logger.error(f"data_analyst_tool_node: JSONDecodeError tool={tool_call['name']} error={str(e)}")
 
-        tool_messages.append(ToolMessage(content=content, tool_call_id=tool_call["id"]))
+        tool_messages.append(ToolMessage(content=str(content), tool_call_id=tool_call["id"]))
 
     logger.info("data_analyst_tool_node: завершена обработка tool_calls")
 

@@ -1,6 +1,7 @@
 import os
 import time
 from datetime import datetime, timezone
+from typing import Any, Dict
 
 from app.agents.client import llm
 from app.agents.core.models import InitChatOutput
@@ -59,7 +60,7 @@ async def generate_initial_metadata(
         created_at = datetime.now(timezone.utc)
         start_ts = time.monotonic()
 
-        raw_result = await structured_llm.ainvoke(prompt)
+        raw_result: Dict[str, Any] = await structured_llm.ainvoke(prompt)  # type: ignore[assignment]
         logger.info(f"Metadata успешно сгенерированы filename={filename}")
 
         duration_ms = int((time.monotonic() - start_ts) * 1000)
