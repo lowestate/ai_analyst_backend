@@ -6,6 +6,8 @@ from functools import wraps
 import warnings
 from datetime import datetime, date
 import uuid
+from dataclasses import dataclass
+from langchain_core.messages import AIMessage
 
 from app.database import pool
 from app.config import logger
@@ -78,7 +80,6 @@ def process_upload(file_obj, filename: str) -> tuple[str, str, dict, list, pd.Da
     # ВАЖНО: Возвращаем очищенный df, чтобы эндпоинт /upload сохранял в БД именно его!
     return chat_id, filename, stats, list(df.columns), df
 
-
 def serialize(obj):
     """
     Рекурсивно обходит объект и конвертирует все Numpy и Pandas типы
@@ -137,7 +138,6 @@ def serialize(obj):
     # Возвращаем стандартные типы (int, str, bool, обычный float) как есть
     return obj
 
-
 def filter_dataframe(df: pd.DataFrame, cols_to_remove: list = None) -> pd.DataFrame:
     """Вспомогательная функция (замена get_df_from_redis): отсекает ненужные столбцы"""
     logger.info("Запуск filter_dataframe")
@@ -159,7 +159,6 @@ def filter_dataframe(df: pd.DataFrame, cols_to_remove: list = None) -> pd.DataFr
             logger.info(f"Столбцы удалены count={len(existing_cols)}")
 
     return df_filtered
-
 
 async def aget_df_from_db(chat_id: str) -> pd.DataFrame:
     """Асинхронно достает датасет из PostgreSQL и конвертирует обратно в DataFrame"""
@@ -184,6 +183,41 @@ async def aget_df_from_db(chat_id: str) -> pd.DataFrame:
 
     return df
 
+@dataclass
+class LLMRequestMetadata:
+    request_id: str
+    input_tokens: int
+    output_tokens: int
+    model_name: str
+
+def get_llm_request_metadata(response: AIMessage) -> LLMRequestMetadata:
+    request_id = response.id
+
+    input_tokens = 0
+    output_tokens = 0
+
+    if hasattr(response, 'usage_metadata') and response.usage_metadata:
+        input_tokens = response.usage_metadata.get('input_tokens', 0)
+        output_tokens = response.usage_metadata.get('output_tokens', 0)
+    elif hasattr(response, 'response_metadata') and response.response_metadata:
+        token_usage = response.response_metadata.get('token_usage', {})
+        input_tokens = token_usage.get('prompt_tokens', 0)
+        output_tokens = token_usage.get('completion_tokens', 0)
+
+    resp_meta = getattr(response, 'response_metadata', {}) or {}
+    model_name = (
+        resp_meta.get('model_name')
+        or resp_meta.get('model_version')
+        or resp_meta.get('model')
+        or 'unknown'
+    )
+
+    return LLMRequestMetadata(
+        request_id=request_id,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        model_name=model_name
+    )
 
 def remove_outliers_iqr(columns=None):
     """Декоратор: Удаляет выбросы по методу Тьюки (IQR)"""
@@ -225,7 +259,6 @@ def remove_outliers_iqr(columns=None):
         return wrapper
 
     return decorator
-
 
 def remove_datetime_columns(func):
     """Декоратор: Очищает датафрейм от колонок с датами"""
@@ -289,7 +322,6 @@ def remove_datetime_columns(func):
 
     return wrapper
 
-
 @remove_outliers_iqr()
 @remove_datetime_columns
 def remove_outliers_and_dates(
@@ -303,7 +335,6 @@ def remove_outliers_and_dates(
 
     return result
 
-
 @remove_datetime_columns
 def remove_dates(
     df: pd.DataFrame,
@@ -315,7 +346,6 @@ def remove_dates(
     logger.info("remove_dates завершен")
 
     return result
-
 
 @remove_outliers_iqr()
 def remove_outliers(

@@ -95,6 +95,7 @@ async def upload_dataset(
                 await graph.aupdate_state(config, {
                     "messages": initial_messages,
                     "chat_id": chat_id,
+                    "user_id": user_id,
                     "charts_payload": [],
                     "all_charts": [],
                     "data_source": "db",
@@ -171,6 +172,7 @@ async def upload_dataset(
     await graph.aupdate_state(config, {
         "messages": initial_messages,
         "chat_id": chat_id,
+        "user_id": user_id,
         "charts_payload": [],
         "all_charts": [],
         "data_sample": data_sample

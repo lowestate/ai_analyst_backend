@@ -1,5 +1,6 @@
 import asyncpg
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from datetime import datetime, timezone
 from pydantic import BaseModel
 
 from app.config import logger
@@ -158,3 +159,52 @@ async def execute_sql_query(creds_dict: dict, query: str) -> list[dict]:
     finally:
         await conn.close()
         logger.info("Соединение с базой данных закрыто в блоке finally функции execute_sql_query")
+
+
+async def log_llm_request(
+    request_id: Optional[str],
+    user_id: Optional[int],
+    chat_id: Optional[str],
+    request_text: str,
+    input_tokens: Optional[int],
+    output_tokens: Optional[int],
+    request_status: int,
+    model: Optional[str],
+    created_at: datetime,
+    duration_ms: int,
+    initiator: str,
+    error_msg: Optional[str] = None,
+) -> None:
+    """Записывает метаданные LLM-запроса в таблицу llm_requests."""
+    from app.database import pool  # Отложенный импорт во избежание циклов
+
+    query = """
+        INSERT INTO llm_requests (
+            request_id, user_id, chat_id, input_text,
+            input_tokens, output_tokens, request_status,
+            model_name, created_at, duration_ms, initiator, error_message
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (request_id) DO NOTHING
+    """
+    try:
+        async with pool.connection() as conn:
+            await conn.execute(
+                query,
+                (
+                    request_id,
+                    user_id,
+                    chat_id,
+                    request_text[:4000] if request_text else None,
+                    input_tokens,
+                    output_tokens,
+                    request_status,
+                    model,
+                    created_at,
+                    duration_ms,
+                    initiator,
+                    error_msg,
+                ),
+            )
+        logger.info(f"log_llm_request записан request_id={request_id} initiator={initiator} duration_ms={duration_ms}")
+    except Exception as e:
+        logger.error(f"log_llm_request ошибка записи request_id={request_id}: {e}")

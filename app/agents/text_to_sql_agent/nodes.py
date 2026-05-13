@@ -1,15 +1,18 @@
 import json
+import time
 import pickle
 import pandas as pd
+from datetime import datetime, timezone
 from langchain_core.messages import ToolMessage, AIMessage
 
 from app.config import logger
 from app.database import pool
 from app.agents.core.state import AgentState
 from app.agents.client import llm
+from app.agents.core.utils import get_llm_request_metadata
 from app.agents.text_to_sql_agent.prompts import TEXT_TO_SQL_PROMPT, TEXT_TO_SQL_REGENERATE_PROMPT
 from app.agents.text_to_sql_agent.models import SQLQueryOutput
-from app.users_db_interaction import execute_sql_query
+from app.users_db_interaction import execute_sql_query, log_llm_request
 
 async def text_to_sql_generate_node(state: AgentState):
     """Узел генерации или перегенерации SQL-запроса."""
@@ -28,7 +31,8 @@ async def text_to_sql_generate_node(state: AgentState):
         query_description = "Пожалуйста, сформируй запрос на основе истории сообщений."
         logger.warning("text_to_sql_generate_node fallback query_description использован")
 
-    llm_instance = llm(temp=0).with_structured_output(SQLQueryOutput)
+    # include_raw=True — получаем и AIMessage (с метаданными), и разобранный объект
+    llm_instance = llm(temp=0).with_structured_output(SQLQueryOutput, include_raw=True)
 
     if state.get("sql_action") == "reject":
         prompt = TEXT_TO_SQL_REGENERATE_PROMPT.format(
@@ -45,11 +49,29 @@ async def text_to_sql_generate_node(state: AgentState):
         )
         logger.info("text_to_sql_generate_node режим generate")
 
+    created_at = datetime.now(timezone.utc)
+    start_ts = time.monotonic()
+
     try:
-        response = await llm_instance.ainvoke([{"role": "user", "content": prompt}])
+        raw_result = await llm_instance.ainvoke([{"role": "user", "content": prompt}])
         logger.info("text_to_sql_generate_node LLM выполнен успешно")
     except Exception as e:
+        duration_ms = int((time.monotonic() - start_ts) * 1000)
         logger.error(f"text_to_sql_generate_node ошибка LLM error={str(e)}")
+        await log_llm_request(
+            request_id=None,
+            user_id=state.get("user_id"),
+            chat_id=state.get("chat_id"),
+            request_text=query_description,
+            input_tokens=None,
+            output_tokens=None,
+            request_status=500,
+            model=None,
+            created_at=created_at,
+            duration_ms=duration_ms,
+            initiator="text_to_sql_agent",
+            error_msg=str(e),
+        )
         return {
             "sql_query": "",
             "waiting_for_sql_approval": True,
@@ -57,6 +79,29 @@ async def text_to_sql_generate_node(state: AgentState):
             "sql_feedback": None,
             "origin_agent": origin_agent
         }
+
+    duration_ms = int((time.monotonic() - start_ts) * 1000)
+
+    # raw_result — dict с ключами "raw" (AIMessage), "parsed" (SQLQueryOutput), "parsing_error"
+    raw_ai_message = raw_result.get("raw")
+    response = raw_result.get("parsed")
+
+    meta = get_llm_request_metadata(raw_ai_message) if raw_ai_message else None
+
+    await log_llm_request(
+        request_id=meta.request_id if meta else None,
+        user_id=state.get("user_id"),
+        chat_id=state.get("chat_id"),
+        request_text=query_description,
+        input_tokens=meta.input_tokens if meta else None,
+        output_tokens=meta.output_tokens if meta else None,
+        request_status=200,
+        model=meta.model_name if meta else None,
+        created_at=created_at,
+        duration_ms=duration_ms,
+        initiator="text_to_sql_agent",
+        error_msg=raw_result.get("parsing_error"),
+    )
 
     if isinstance(response, dict):
         sql_query = response.get("sql_query", "")
@@ -134,7 +179,6 @@ async def text_to_sql_execute_node(state: AgentState):
         logger.error(f"text_to_sql_execute_node ошибка SQL error={str(e)}")
         result_str = f"Ошибка выполнения SQL: {str(e)}"
 
-    # === ИЗМЕНЕНИЕ ЗДЕСЬ: Вшиваем сам запрос в историю для фронтенда и LLM ===
     final_content = f"[SQL_QUERY]\n{query}\n[/SQL_QUERY]\n{result_str}"
 
     tool_message = ToolMessage(

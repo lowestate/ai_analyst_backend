@@ -6,6 +6,7 @@ from langgraph.graph.message import add_messages
 class AgentState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
     chat_id: str
+    user_id: Optional[int]
     charts_payload: Sequence[Dict[str, Any]]
     all_charts: Annotated[list, operator.add]  # Все графики чата (аккумулятивно)
     next_agent: str
