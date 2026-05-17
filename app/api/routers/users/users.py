@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from app.database import pool
 from app.config import logger
 from app.api.routers.users.models import UserCreate, UserLogin, SubscriptionChangeRequest
+from app.users_db_interaction import get_user_plan
 
 # Можно добавить prefix="/users", но чтобы не сломать твой фронтенд, 
 # пока оставим пути как были, просто сгруппировав их тегами.
@@ -169,4 +170,17 @@ async def change_subscription(req: SubscriptionChangeRequest):
         "message": f"Подписка успешно изменена на {target_plan_clean}",
         "new_plan_id": new_plan_id,
         "plan_name": target_plan_clean
+    }
+
+@router.get("/users/{user_id}")
+async def get_user_info(user_id: int):
+    """Возвращает информацию о пользователе, включая текущий тарифный план (plan_name)"""
+    logger.info(f"Получение информации о пользователе user_id={user_id}")
+    
+    plan_id, plan_name = await get_user_plan(user_id)
+            
+    return {
+        "user_id": user_id,
+        "plan_id": plan_id,
+        "plan_name": plan_name
     }

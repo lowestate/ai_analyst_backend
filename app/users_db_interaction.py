@@ -13,6 +13,52 @@ class DBCredentials(BaseModel):
     password: str
 
 
+async def get_user_plan(user_id: int) -> tuple[int, str]:
+    """Возвращает plan_id и plan_name пользователя из базы данных."""
+    from app.database import pool
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT u.plan_id, p.plan_name 
+                    FROM users u
+                    LEFT JOIN plans p ON u.plan_id = p.plan_id
+                    WHERE u.user_id = %s
+                    """, (user_id,)
+                )
+                row = await cur.fetchone()
+                if row and row[0] is not None:
+                    return row[0], row[1] or "free"
+                return 1, "free"  # По умолчанию free
+    except Exception as e:
+        logger.error(f"Ошибка при получении плана пользователя user_id={user_id}: {str(e)}")
+        return 1, "free"
+
+async def check_user_rate_limit(user_id: int) -> bool:
+    """
+    Возвращает True, если лимит не превышен, и False, если превышен (>= 5 запросов в минуту).
+    """
+    from app.database import pool
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT COUNT(*) FROM llm_requests 
+                    WHERE user_id = %s 
+                      AND initiator = 'user' 
+                      AND created_at >= NOW() - INTERVAL '1 minute'
+                    """,
+                    (user_id,)
+                )
+                row = await cur.fetchone()
+                count = row[0] if row else 0
+                return count < 5
+    except Exception as e:
+        logger.error(f"Ошибка при проверке лимитов запросов user_id={user_id}: {str(e)}")
+        return True
+
 async def extract_schema_from_db(creds: DBCredentials) -> Dict[str, Any]:
     logger.info(f"Начало выполнения функции extract_schema_from_db для базы данных: {creds.database}")
     

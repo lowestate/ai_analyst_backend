@@ -286,7 +286,7 @@ def get_pairplot_data(df: pd.DataFrame, cols_to_remove: list[str] = []) -> dict:
         default_cols = num_cols
 
     for col in num_cols:
-        if df[col].isnull().any():
+        if bool(df[col].isnull().any()):
             df[col] = df[col].fillna(df[col].median())
 
     logger.info(f"NaN заполнены pairplot cols={len(num_cols)}")
@@ -406,7 +406,7 @@ def get_feature_tree(df: pd.DataFrame, cols_to_remove: list[str] = None) -> dict
         df[col] = pd.factorize(df[col])[0]
 
     for col in df.columns:
-        if df[col].isnull().any():
+        if bool(df[col].isnull().any()):
             df[col] = df[col].fillna(df[col].median())
 
     corr = df.corr().fillna(0)

@@ -15,7 +15,7 @@ import pickle
 
 from app.database import pool
 from app.api.dependencies import get_app_graph
-from app.users_db_interaction import DBCredentials, extract_schema_from_db
+from app.users_db_interaction import DBCredentials, extract_schema_from_db, get_user_plan, check_user_rate_limit
 from app.api.routers.chat.models import (
     ChatCreateResponse,
     ChatRequest,
@@ -217,6 +217,16 @@ async def chat_interaction(
         logger.warning(f"Запрещен доступ chat_id={req.chat_id} user_id={req.user_id}")
         raise HTTPException(status_code=403, detail="Доступ запрещен")
 
+    plan_id, _ = await get_user_plan(req.user_id)
+    
+    if req.use_ai:
+        if plan_id == 1:
+            raise HTTPException(status_code=403, detail="Использование AI недоступно на тарифе free")
+        elif plan_id == 2:
+            is_allowed = await check_user_rate_limit(req.user_id)
+            if not is_allowed:
+                raise HTTPException(status_code=429, detail="Превышен лимит запросов в минуту (5) для тарифа pro")
+
     config = {
         "configurable": {
             "thread_id": req.chat_id,
@@ -320,17 +330,18 @@ async def chat_interaction(
             else:
                 logger.warning(f"Mock handler не найден chat_id={req.chat_id}")
 
-                final_message = "Я не знаю такой команды."
+                final_message = "Я не знаю такой команды в рамках мок-режима. Воспользуйтесь коммандами"
                 charts = []
 
             # Обновляем стейт графа (CustomAsyncPostgresSaver сам сохранит это в chat_checkpoints)
+            current_all_charts = current_state.get("all_charts", [])
             final_state_values = {
                 "messages": [
                     HumanMessage(content=msg_clean),
-                    AIMessage(content=final_message)
+                    AIMessage(content=final_message, additional_kwargs={"charts": charts})
                 ],
                 "charts_payload": charts,
-                "all_charts": charts
+                "all_charts": current_all_charts + charts
             }
 
             await graph.aupdate_state(config, final_state_values, as_node="__start__")
@@ -372,6 +383,18 @@ async def chat_interaction(
 
     # Получаем последнее сообщение
     messages = state_values.get("messages", [])
+    charts_payload = state_values.get("charts_payload", [])
+
+    # === ИНЪЕКЦИЯ ГРАФИКОВ В AIMESSAGE ===
+    if charts_payload and messages and isinstance(messages[-1], AIMessage):
+        last_msg = messages[-1]
+        if "charts" not in last_msg.additional_kwargs:
+            last_msg.additional_kwargs["charts"] = charts_payload
+            try:
+                await graph.aupdate_state(config, {"messages": [last_msg]}, as_node="__start__")
+                logger.info(f"Графики привязаны к AIMessage id={last_msg.id}")
+            except Exception as e:
+                logger.error(f"Не удалось обновить сообщение с графиками: {e}")
 
     if not messages:
         logger.warning(f"Пустой messages state chat_id={req.chat_id}")
@@ -447,7 +470,6 @@ async def get_chat_history(
     messages_formatted = []
     charts_payload = []
     is_waiting = False
-    sql_query = None
     db_schema = None
     
     if state_snap and state_snap.values:
@@ -457,7 +479,6 @@ async def get_chat_history(
         charts_payload = state_vals.get("all_charts", [])
         db_schema = state_vals.get("db_schema")
         is_waiting = state_vals.get("waiting_for_sql_approval", False)
-        sql_query = state_vals.get("sql_query")
 
         for i, m in enumerate(raw_messages):
             m_type = getattr(m, "type", "") if not isinstance(m, dict) else m.get("type", "")
@@ -521,10 +542,14 @@ async def get_chat_history(
                 if is_db_prompt: # or is_file_prompt:
                     continue
 
+            add_kwargs = getattr(m, "additional_kwargs", {}) if not isinstance(m, dict) else m.get("additional_kwargs", {})
+            msg_charts = add_kwargs.get("charts", []) if sender == "agent" else []
+
             messages_formatted.append({
                 "id": str(id(m)), 
                 "sender": sender, 
-                "text": text
+                "text": text,
+                "charts": msg_charts
             })
 
     return {
