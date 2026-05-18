@@ -13,15 +13,15 @@ class DBCredentials(BaseModel):
     password: str
 
 
-async def get_user_plan(user_id: int) -> tuple[int, str]:
-    """Возвращает plan_id и plan_name пользователя из базы данных."""
+async def get_user_plan(user_id: int) -> tuple[int, str, str]:
+    """Возвращает plan_id, plan_name и role пользователя из базы данных."""
     from app.database import pool
     try:
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """
-                    SELECT u.plan_id, p.plan_name 
+                    SELECT u.plan_id, p.plan_name, u.role
                     FROM users u
                     LEFT JOIN plans p ON u.plan_id = p.plan_id
                     WHERE u.user_id = %s
@@ -29,11 +29,55 @@ async def get_user_plan(user_id: int) -> tuple[int, str]:
                 )
                 row = await cur.fetchone()
                 if row and row[0] is not None:
-                    return row[0], row[1] or "free"
-                return 1, "free"  # По умолчанию free
+                    return row[0], row[1] or "free", row[2] or "user"
+                return 1, "free", "user"  # По умолчанию free, user
     except Exception as e:
         logger.error(f"Ошибка при получении плана пользователя user_id={user_id}: {str(e)}")
-        return 1, "free"
+        return 1, "free", "user"
+
+async def get_llm_requests_data(limit: int, offset: int, sort_col: str, sort_order: str, filter_col: str = None, filter_val: str = None) -> tuple[list[dict], int]:
+    """Возвращает данные таблицы llm_requests для админ-панели."""
+    from app.database import pool
+    
+    # Защита от SQL-инъекций через белые списки
+    allowed_cols = ["request_id", "user_id", "chat_id", "input_text", "input_tokens", "output_tokens", "request_status", "model_name", "created_at", "duration_ms", "initiator", "error_message"]
+    
+    if sort_col not in allowed_cols:
+        sort_col = "created_at"
+    
+    if sort_order.upper() not in ["ASC", "DESC"]:
+        sort_order = "DESC"
+        
+    where_clause = ""
+    params = []
+    
+    if filter_col and filter_col in allowed_cols and filter_val:
+        where_clause = f"WHERE CAST({filter_col} AS TEXT) ILIKE %s"
+        params.append(f"%{filter_val}%")
+        
+    query = f"SELECT * FROM llm_requests {where_clause} ORDER BY {sort_col} {sort_order} LIMIT %s OFFSET %s"
+    count_query = f"SELECT COUNT(*) FROM llm_requests {where_clause}"
+    
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                # Получаем общее количество
+                await cur.execute(count_query, params)
+                count_row = await cur.fetchone()
+                total_count = count_row[0] if count_row else 0
+                
+                # Получаем данные
+                data_params = params + [limit, offset]
+                await cur.execute(query, data_params)
+                
+                columns = [desc[0] for desc in cur.description] if cur.description else []
+                rows = await cur.fetchall()
+                data = [dict(zip(columns, row)) for row in rows] if rows else []
+                
+                return data, total_count
+    except Exception as e:
+        logger.error(f"Ошибка при получении llm_requests: {str(e)}")
+        return [], 0
 
 async def check_user_rate_limit(user_id: int) -> bool:
     """
@@ -254,3 +298,96 @@ async def log_llm_request(
         logger.info(f"log_llm_request записан request_id={request_id} initiator={initiator} duration_ms={duration_ms}")
     except Exception as e:
         logger.error(f"log_llm_request ошибка записи request_id={request_id}: {e}")
+
+
+async def get_users_data(
+    limit: int,
+    offset: int,
+    sort_col: str,
+    sort_order: str,
+    filter_col: Optional[str] = None,
+    filter_val: Optional[str] = None
+) -> tuple[list[dict], int]:
+    """Возвращает данные таблицы users (без паролей) для админ-панели."""
+    from app.database import pool
+    
+    # Разрешенные колонки для сортировки/фильтрации
+    allowed_cols = ["user_id", "username", "plan_id", "is_active", "role"]
+    
+    if sort_col not in allowed_cols:
+        sort_col = "user_id"
+        
+    if sort_order.upper() not in ["ASC", "DESC"]:
+        sort_order = "ASC"
+        
+    where_clause = ""
+    params = []
+    
+    if filter_col and filter_col in allowed_cols and filter_val:
+        # Для булевой колонки is_active приводим к тексту, чтобы работал ILIKE
+        where_clause = f"WHERE CAST({filter_col} AS TEXT) ILIKE %s"
+        params.append(f"%{filter_val}%")
+        
+    query = f"SELECT user_id, username, plan_id, is_active, role FROM users {where_clause} ORDER BY {sort_col} {sort_order} LIMIT %s OFFSET %s"
+    count_query = f"SELECT COUNT(*) FROM users {where_clause}"
+    
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                # Получаем общее количество
+                await cur.execute(count_query, params)
+                count_row = await cur.fetchone()
+                total_count = count_row[0] if count_row else 0
+                
+                # Получаем данные
+                data_params = params + [limit, offset]
+                await cur.execute(query, data_params)
+                
+                columns = [desc[0] for desc in cur.description] if cur.description else []
+                rows = await cur.fetchall()
+                data = [dict(zip(columns, row)) for row in rows] if rows else []
+                
+                return data, total_count
+    except Exception as e:
+        logger.error(f"Ошибка при получении пользователей: {str(e)}")
+        return [], 0
+
+
+async def get_plans_list() -> list[dict]:
+    """Возвращает список всех тарифных планов (id и название) из таблицы plans."""
+    from app.database import pool
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute("SELECT plan_id, plan_name FROM plans ORDER BY plan_id ASC")
+                rows = await cur.fetchall()
+                if rows:
+                    return [{"plan_id": r[0], "plan_name": r[1]} for r in rows]
+                return []
+    except Exception as e:
+        logger.error(f"Ошибка при получении списка планов: {str(e)}")
+        return []
+
+
+async def update_user_admin(target_user_id: int, role: str, plan_id: int, is_active: bool) -> bool:
+    """Обновляет роль, план и статус активности пользователя (запрос от администратора)."""
+    from app.database import pool
+    try:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                # Проверяем, существует ли план
+                await cur.execute("SELECT plan_id FROM plans WHERE plan_id = %s", (plan_id,))
+                if not await cur.fetchone():
+                    logger.warning(f"План plan_id={plan_id} не найден при обновлении юзера")
+                    return False
+                    
+                # Обновляем роль, план и статус активности
+                await cur.execute(
+                    "UPDATE users SET role = %s, plan_id = %s, is_active = %s WHERE user_id = %s RETURNING user_id",
+                    (role, plan_id, is_active, target_user_id)
+                )
+                row = await cur.fetchone()
+                return row is not None
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении пользователя target_user_id={target_user_id}: {str(e)}")
+        return False

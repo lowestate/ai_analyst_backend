@@ -217,7 +217,7 @@ async def chat_interaction(
         logger.warning(f"Запрещен доступ chat_id={req.chat_id} user_id={req.user_id}")
         raise HTTPException(status_code=403, detail="Доступ запрещен")
 
-    plan_id, _ = await get_user_plan(req.user_id)
+    plan_id, _, _ = await get_user_plan(req.user_id)
     
     if req.use_ai:
         if plan_id == 1:

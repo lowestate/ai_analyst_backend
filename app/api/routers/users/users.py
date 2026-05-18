@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException
 
 from app.database import pool
 from app.config import logger
+from pydantic import BaseModel
 from app.api.routers.users.models import UserCreate, UserLogin, SubscriptionChangeRequest
 from app.users_db_interaction import get_user_plan
 
@@ -73,7 +74,7 @@ async def login_user(user: UserLogin):
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT user_id, password FROM users WHERE username = %s",
+                "SELECT user_id, password, role FROM users WHERE username = %s",
                 (user.username,)
             )
 
@@ -88,7 +89,7 @@ async def login_user(user: UserLogin):
             detail="Неверный логин или пароль"
         )
 
-    user_id, hashed_password = row
+    user_id, hashed_password, role = row
 
     logger.info(f"Пользователь найден user_id={user_id}")
 
@@ -109,7 +110,8 @@ async def login_user(user: UserLogin):
     return {
         "status": "success",
         "user_id": user_id,
-        "username": user.username
+        "username": user.username,
+        "role": role or "user"
     }   
 
 @router.post("/logout")
@@ -177,10 +179,93 @@ async def get_user_info(user_id: int):
     """Возвращает информацию о пользователе, включая текущий тарифный план (plan_name)"""
     logger.info(f"Получение информации о пользователе user_id={user_id}")
     
-    plan_id, plan_name = await get_user_plan(user_id)
+    plan_id, plan_name, role = await get_user_plan(user_id)
             
     return {
         "user_id": user_id,
         "plan_id": plan_id,
-        "plan_name": plan_name
+        "plan_name": plan_name,
+        "role": role
     }
+
+from typing import Optional
+
+@router.get("/admin/llm_requests")
+async def get_admin_llm_requests(
+    limit: int = 10,
+    offset: int = 0,
+    sort_col: str = "created_at",
+    sort_order: str = "DESC",
+    filter_col: Optional[str] = None,
+    filter_val: Optional[str] = None
+):
+    from app.users_db_interaction import get_llm_requests_data
+    data, total = await get_llm_requests_data(
+        limit=limit,
+        offset=offset,
+        sort_col=sort_col,
+        sort_order=sort_order,
+        filter_col=filter_col,
+        filter_val=filter_val
+    )
+    return {
+        "data": data,
+        "total": total
+    }
+
+
+class UserAdminUpdate(BaseModel):
+    role: str
+    plan_id: int
+    is_active: bool
+
+
+@router.get("/admin/users")
+async def get_admin_users(
+    limit: int = 10,
+    offset: int = 0,
+    sort_col: str = "user_id",
+    sort_order: str = "ASC",
+    filter_col: Optional[str] = None,
+    filter_val: Optional[str] = None
+):
+    from app.users_db_interaction import get_users_data
+    data, total = await get_users_data(
+        limit=limit,
+        offset=offset,
+        sort_col=sort_col,
+        sort_order=sort_order,
+        filter_col=filter_col,
+        filter_val=filter_val
+    )
+    return {
+        "data": data,
+        "total": total
+    }
+
+
+@router.get("/admin/plans")
+async def get_admin_plans():
+    from app.users_db_interaction import get_plans_list
+    plans = await get_plans_list()
+    return plans
+
+
+@router.put("/admin/users/{user_id}")
+async def update_user_by_admin(user_id: int, req: UserAdminUpdate):
+    from app.users_db_interaction import update_user_admin
+    success = await update_user_admin(
+        target_user_id=user_id,
+        role=req.role,
+        plan_id=req.plan_id,
+        is_active=req.is_active
+    )
+    if not success:
+        raise HTTPException(
+            status_code=400,
+            detail="Не удалось обновить данные пользователя. Проверьте правильность plan_id."
+        )
+    return {
+        "status": "success",
+        "message": f"Пользователь user_id={user_id} успешно обновлен"
+    }
